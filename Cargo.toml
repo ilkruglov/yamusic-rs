@@ -5,7 +5,10 @@ edition = "2021"
 rust-version = "1.92"
 license = "GPL-3.0-only"
 description = "Яндекс Музыка RS — неофициальный клиент Яндекс Музыки на Rust"
-repository = "https://github.com/SpolzerMod/yamusic-rs"
+repository = "https://github.com/ilkruglov/yamusic-rs"
+
+[features]
+asio = ["dep:winreg", "dep:cc"]
 
 [dependencies]
 skia-safe = { version = "0.153.3", default-features = false }
@@ -20,6 +23,10 @@ sha2 = "0.10"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 miniz_oxide = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Foundation", "Media", "Win32_System_WinRT"] }
+winreg = { version = "0.56", optional = true }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
@@ -53,6 +60,7 @@ futures-lite = "2"
 secret-service = { version = "5.2", default-features = false, features = ["rt-async-io-crypto-rust"] }
 
 [build-dependencies]
+cc = { version = "1", optional = true }
 slint-build = "1.18"
 
 [profile.release]
@@ -112,3 +120,6 @@ assets = [
 [package.metadata.generate-rpm.recommends]
 xdg-utils = "*"
 "(zenity or kdialog)" = "*"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = ["Media_Control"] }

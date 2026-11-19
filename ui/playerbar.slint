@@ -179,7 +179,7 @@ export component PlayerBar inherits Rectangle {
                 width: 40px;
                 height: 40px;
                 Icon {
-                    source: App.playing ? Icons.pause-filled : Icons.play-filled;
+                    source: App.can-pause ? Icons.pause-filled : Icons.play-filled;
                     size: 40px;
                     colorize: play-ta.has-hover ? Theme.controls-color-primary-default-hovered : Theme.controls-color-primary-default-enabled;
                 }
@@ -323,7 +323,7 @@ export component MiniPlayer inherits Rectangle {
             width: 40px;
             height: 40px;
             Icon {
-                source: App.playing ? Icons.pause-filled : Icons.play-filled;
+                source: App.can-pause ? Icons.pause-filled : Icons.play-filled;
                 size: 40px;
                 colorize: play-ta.has-hover ? Theme.controls-color-primary-default-hovered : Theme.controls-color-primary-default-enabled;
             }

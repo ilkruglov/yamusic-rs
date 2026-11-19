@@ -35,7 +35,7 @@ export component TrackRow inherits Rectangle {
         source: item.cover;
         if hot || current: Rectangle {
             background: #00000066;
-            Icon { source: current && App.playing ? Icons.pause-filled-xs : Icons.play-filled-xs; size: 24px; colorize: #e6e6e6; }
+            Icon { source: current && App.can-pause ? Icons.pause-filled-xs : Icons.play-filled-xs; size: 24px; colorize: #e6e6e6; }
         }
     }
     HorizontalLayout {
@@ -163,7 +163,7 @@ export component BlockHeader inherits Rectangle {
     title := Text {
         x: 0;
         text: root.text;
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: Theme.font-size-headline-m;
         font-weight: 700;
         color: Theme.controls-color-primary-text-enabled-variant;

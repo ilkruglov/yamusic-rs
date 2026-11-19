@@ -206,19 +206,22 @@ const FONTS: &[&str] = &[
     "YSMusic-HeadlineBold",
 ];
 
-pub fn register_fonts(asar: &mut Source) -> bool {
+pub(crate) fn load_fonts(source: &mut Source) -> Vec<Vec<u8>> {
+    FONTS.iter().filter_map(|name| {
+        let data = source.read(&format!("app/fonts/{name}.woff")).and_then(|bytes| woff_to_sfnt(&bytes));
+        if data.is_none() {
+            log(format!("шрифт {name} не найден"));
+        }
+        data
+    }).collect()
+}
+
+pub(crate) fn register_fonts(fonts: Vec<Vec<u8>>) {
     use slint::fontique_011::fontique;
     let mut collection = slint::fontique_011::shared_collection();
-    let mut ok = false;
-    for name in FONTS {
-        let Some(sfnt) = asar.read(&format!("app/fonts/{name}.woff")).and_then(|w| woff_to_sfnt(&w)) else {
-            log(format!("шрифт {name} не найден"));
-            continue;
-        };
+    for sfnt in fonts {
         collection.register_fonts(fontique::Blob::new(std::sync::Arc::new(sfnt)), None);
-        ok = true;
     }
-    ok
 }
 
 /// Символы спрайта как отдельные SVG. `currentColor` становится белым, цвет задаёт `colorize` в Slint.

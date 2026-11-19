@@ -20,11 +20,13 @@ const WM_WAKE: u32 = WM_APP + 2;
 /// Медиаклавиши клавиатуры: id горячей клавиши и код клавиши.
 const MEDIA_KEYS: [(i32, u16); 3] = [(1, VK_MEDIA_PLAY_PAUSE), (2, VK_MEDIA_NEXT_TRACK), (3, VK_MEDIA_PREV_TRACK)];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Toggle,
     Show,
     PlayPause,
+    Play,
+    Pause,
     Prev,
     Next,
     Updates,
@@ -50,7 +52,69 @@ struct Tray {
     state: Box<dyn Fn() -> MenuState>,
 }
 
+#[derive(Default)]
+struct Media {
+    session: Option<crate::smtc::Session>,
+    keys_active: bool,
+    retry_at: Option<std::time::Instant>,
+}
+
+impl Media {
+    fn legacy_keys(&mut self, hwnd: HWND, active: bool) {
+        if self.keys_active == active { return; }
+        self.keys_active = active;
+        for (id, vk) in MEDIA_KEYS {
+            unsafe {
+                if active {
+                    if RegisterHotKey(hwnd, id, 0, vk as u32) == 0 {
+                        crate::config::log(format!("RegisterHotKey({vk}): {}", std::io::Error::last_os_error()));
+                    }
+                } else {
+                    UnregisterHotKey(hwnd, id);
+                }
+            }
+        }
+    }
+
+    fn close(&mut self, hwnd: HWND) {
+        self.session = None;
+        self.retry_at = None;
+        self.legacy_keys(hwnd, false);
+    }
+
+    fn update(&mut self, hwnd: HWND, state: &crate::player::Shared) {
+        if state.status != crate::player::Status::Ready {
+            self.close(hwnd);
+            return;
+        }
+        if self.retry_at.is_some_and(|at| std::time::Instant::now() < at) { return; }
+        match self.publish(hwnd, state) {
+            Ok(()) => self.retry_at = None,
+            Err(e) => {
+                crate::config::log(format!("SMTC: {e}"));
+                self.session = None;
+                self.legacy_keys(hwnd, true);
+                self.retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+            }
+        }
+    }
+
+    fn publish(&mut self, hwnd: HWND, state: &crate::player::Shared) -> windows::core::Result<()> {
+        let session = match self.session {
+            Some(ref mut session) => session,
+            None => {
+                self.legacy_keys(hwnd, false);
+                let session = crate::smtc::Session::new(windows::Win32::Foundation::HWND(hwnd), emit)?;
+                self.session.insert(session)
+            }
+        };
+        session.update(state)
+    }
+
+}
+
 thread_local! {
+    static MEDIA: RefCell<Media> = RefCell::default();
     static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
 }
 
@@ -99,25 +163,24 @@ pub fn install(on_event: impl Fn(Event) + 'static, state: impl Fn() -> MenuState
         let msg = wide("TaskbarCreated");
         let taskbar_created = RegisterWindowMessageW(msg.as_ptr());
         add_icon(hwnd, icon);
-        // Глобально, чтобы клавиши работали и при свёрнутом окне. Если клавишу уже занял
-        // другой плеер, RegisterHotKey просто вернёт ошибку — тогда она остаётся за ним.
-        for (id, vk) in MEDIA_KEYS {
-            RegisterHotKey(hwnd, id, 0, vk as u32);
-        }
         TRAY.with(|t| {
             *t.borrow_mut() = Some(Tray { hwnd, icon, taskbar_created, on_event: Rc::new(on_event), state: Box::new(state) })
         });
     }
 }
 
+pub(crate) fn update_media(state: &crate::player::Shared) {
+    if let Some(hwnd) = TRAY.with(|tray| tray.borrow().as_ref().map(|t| t.hwnd)) {
+        MEDIA.with(|media| media.borrow_mut().update(hwnd, state));
+    }
+}
+
 pub fn remove() {
     let Some(t) = TRAY.with(|t| t.borrow_mut().take()) else { return };
+    MEDIA.with(|media| media.borrow_mut().close(t.hwnd));
     let nid = notify_data(t.hwnd, t.icon);
     unsafe {
         Shell_NotifyIconW(NIM_DELETE, &nid);
-        for (id, _) in MEDIA_KEYS {
-            UnregisterHotKey(t.hwnd, id);
-        }
         DestroyWindow(t.hwnd);
     }
 }

@@ -30,11 +30,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: ASIO SDK
+        uses: actions/checkout@v7
+        with:
+          repository: audiosdk/asio
+          ref: 496a0765b8bb9c26f764f22f9a9712a937177db2
+          path: .tmp/asio-sdk
+          persist-credentials: false
+      - name: Путь ASIO SDK
+        shell: pwsh
+        run: |
+          "CPAL_ASIO_DIR=$env:GITHUB_WORKSPACE\.tmp\asio-sdk" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo clippy --release --all-targets -- -D warnings
-      - run: cargo test --release
-      - run: cargo build --release
+      - run: cargo clippy --locked --release --features asio --all-targets -- -D warnings
+      - run: cargo test --locked --release --features asio
+      - run: cargo build --locked --release --features asio
 
       - name: SHA-256
         shell: pwsh
@@ -44,6 +55,15 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           path: target/release/yamusic-rs.exe
+          archive: false
+
+      - name: Уведомления о лицензии ASIO SDK
+        shell: pwsh
+        run: |
+          Copy-Item .tmp/asio-sdk/LICENSE.txt target/release/ASIO-SDK-NOTICES.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          path: target/release/ASIO-SDK-NOTICES.txt
           archive: false
 
   # Ubuntu 22.04 — самая старая glibc (2.35) среди поддерживаемых: собранное здесь

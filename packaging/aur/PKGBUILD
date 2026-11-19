@@ -4,7 +4,7 @@
 # При новой версии: pkgver, затем `updpkgsums && makepkg --printsrcinfo > .SRCINFO`.
 
 pkgname=yamusic-rs-bin
-pkgver=1.0.2
+pkgver=1.1.2
 pkgrel=1
 pkgdesc='Неофициальный клиент Яндекс Музыки на Rust и Slint, без Electron'
 arch=('x86_64')
@@ -23,7 +23,7 @@ options=('!debug' '!strip')
 provides=('yamusic-rs')
 conflicts=('yamusic-rs')
 source=("$url/releases/download/v$pkgver/yamusic-rs_$pkgver-1_amd64.deb")
-sha256sums=('SKIP')
+sha256sums=('2ea031bfe066a0c4e8c1327ca87cdf6896f621454858c4e7b91b9115d4f9291a')
 
 package() {
   bsdtar -xf data.tar.* -C "$pkgdir"

@@ -6,12 +6,11 @@
 
 **Интерфейс официального приложения Яндекс Музыки на Rust: один файл и в 13 раз меньше памяти.**
 
-[![Релиз](https://img.shields.io/github/v/release/SpolzerMod/yamusic-rs?label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7&color=ffd60a&labelColor=1c1c1f)](https://github.com/SpolzerMod/yamusic-rs/releases/latest)
 ![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-2b2b30?labelColor=1c1c1f)
 ![Linux бета](https://img.shields.io/badge/Linux-%D0%B1%D0%B5%D1%82%D0%B0-2b2b30?labelColor=1c1c1f)
 [![GPL-3.0](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-GPL--3.0-2b2b30?labelColor=1c1c1f)](LICENSE)
 
-[Скачать](https://github.com/SpolzerMod/yamusic-rs/releases/latest) ·
+[Собрать Windows-версию](#сборка) ·
 [Возможности](#возможности) ·
 [Замеры](#замеры) ·
 [Какие системы](#какие-системы-поддерживаются) ·
@@ -64,7 +63,7 @@
   не остановится.
 - Мини-плеер поверх всех окон: обложка, название и три кнопки. Включается кнопкой рядом
   с «Свернуть».
-- Медиаклавиши клавиатуры работают, даже когда окно свёрнуто.
+- После входа медиаклавиши работают и при свёрнутом окне. В Windows системная медиапанель показывает название и исполнителя, позволяет поставить трек на паузу и переключить его. Первое нажатие Play может запустить Мою волну.
 - Статус «Слушает …» в Discord и переключатель «Меньше ИИ» для рекомендаций.
 - Обновление из приложения: когда выходит новая версия, сверху появляется кнопка «Обновить».
 - Режим «Лёгкий» без анимаций для слабых компьютеров.
@@ -92,7 +91,7 @@
 
 ### Windows
 
-1. Скачайте `yamusic-rs.exe` со страницы [последнего релиза](https://github.com/SpolzerMod/yamusic-rs/releases/latest).
+1. Соберите `yamusic-rs.exe` по [инструкции для Windows](#сборка). У форка пока нет опубликованного релиза.
 2. Положите файл в любую папку, например в `Документы` или `C:\Programs`, и запустите.
    Установщика нет, приложение целиком помещается в один exe.
 3. Приложение покажет код. Откройте [ya.ru/device](https://ya.ru/device) на компьютере или телефоне
@@ -238,7 +237,6 @@ Get-FileHash .\yamusic-rs.exe -Algorithm SHA256
 - на «Для вас и Тренды» показываются не все блоки: например, «Подборки музыки» и «Артист рекомендует»
   пока пропускаются;
 - нет выбора города для концертов и загрузки своих треков;
-- на Windows нет панели управления в системном меню громкости (на Linux она есть через MPRIS);
 - собственные настройки RS («Режим работы», «Статус в Discord», автозапуск) переведены только на русский.
 
 Есть и то, чего нет в оригинале: режим «Лёгкий», статус в Discord, автозапуск в трее.
@@ -314,7 +312,7 @@ API Яндекса неофициальный и может меняться б�
 Нужен Rust 1.92 или новее (`rustup update stable`). Дальше на любой системе одинаково:
 
 ```bash
-git clone https://github.com/SpolzerMod/yamusic-rs
+git clone --branch windows-player https://github.com/ilkruglov/yamusic-rs
 cd yamusic-rs
 cargo build --release
 ```
@@ -327,6 +325,18 @@ cargo build --release
 Нужны Visual Studio Build Tools с компонентом «Разработка классических приложений на C++»
 (MSVC и Windows SDK: из SDK берётся `rc.exe` для значка и описания exe).
 Готовый файл: `target\release\yamusic-rs.exe`.
+
+Для сборки с ASIO скачайте [ASIO SDK](https://github.com/audiosdk/asio).
+Укажите папку SDK в `CPAL_ASIO_DIR`.
+
+```powershell
+$env:CPAL_ASIO_DIR = 'C:\sdk\asio'
+cargo build --locked --release --features asio
+```
+
+В «Настройки → Аудиовыход» выберите системный выход или установленный ASIO-драйвер.
+Выбор применяется сразу. Плеер сохраняет позицию и паузу; в режиме системного вывода он следует за устройством по умолчанию в Windows.
+В Windows-сборках GitHub Actions функция ASIO включена.
 
 #### Linux
 
@@ -441,7 +451,7 @@ of Electron it is a single 26 MB executable that renders its window on the CPU w
 Running the same scenario, the official app uses about 850 MB of RAM across 7 processes, and RS
 uses about 65 MB in one process.
 
-- **Windows:** download `yamusic-rs.exe` from the [latest release](https://github.com/SpolzerMod/yamusic-rs/releases/latest)
+- **Windows:** build `yamusic-rs.exe` using the [Windows build instructions](#сборка)
   and run it; there is no installer. Sign in with the code shown at [ya.ru/device](https://ya.ru/device).
   The app updates itself from GitHub releases.
 - **Linux (beta):** the release has a `.deb` (Debian, Ubuntu, Mint), an `.rpm` (Fedora, openSUSE)

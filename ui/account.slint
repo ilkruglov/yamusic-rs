@@ -3,6 +3,7 @@
 import { Theme } from "theme.slint";
 import { Icons, Icon, Cover, NavCircle, PillButton } from "widgets.slint";
 import { T, App } from "state.slint";
+import { ComboBox } from "std-widgets.slint";
 
 // Меню профиля — окно Яндекс ID оригинала (iframe yandex.ru/user-id): 320 в ширину,
 // пункты 44, подменю языка и темы всплывают поверх. Иконки сняты с самого окна.
@@ -322,7 +323,7 @@ export component SettingsPage inherits Rectangle {
             height: 32px;
             text: T.t("Настройки");
             vertical-alignment: center;
-            font-family: "YS Music Headline";
+            font-family: App.headline-font;
             font-size: Theme.font-size-headline-xl;
             font-weight: 700;
             color: Theme.controls-color-primary-text-enabled-variant;
@@ -338,6 +339,28 @@ export component SettingsPage inherits Rectangle {
                 title: T.t("Эквалайзер");
                 desc: App.eq-on ? T.t("Включен") : T.t("Выключен");
                 clicked => { App.eq-open = true; }
+            }
+            if App.asio-available: VerticalLayout {
+                spacing: 8px;
+                Text {
+                    text: T.t("Аудиовыход");
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: Theme.controls-color-primary-text-enabled-variant;
+                }
+                output := ComboBox {
+                    enabled: !App.audio-output-pending;
+                    model: App.audio-outputs;
+                    current-index <=> App.audio-output-index;
+                    selected => { App.select-audio-output(output.current-index); }
+                }
+                if App.audio-output-pending || App.audio-outputs.length == 1: Text {
+                    text: App.audio-output-pending ? T.t("Переключаем аудиовыход…")
+                        : T.t("ASIO-драйверы не найдены");
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    color: Theme.controls-color-primary-text-enabled;
+                }
             }
             VerticalLayout {
                 spacing: 16px;
@@ -443,7 +466,7 @@ export component LoginScreen inherits Rectangle {
         Text {
             text: T.t("Войдите в Яндекс Музыку");
             horizontal-alignment: center;
-            font-family: "YS Music Headline";
+            font-family: App.headline-font;
             font-size: Theme.font-size-headline-xl;
             font-weight: 700;
             color: root.ink;
@@ -476,7 +499,7 @@ export component LoginScreen inherits Rectangle {
                     width: 40px;
                     Text {
                         text: ch;
-                        font-family: "YS Music Headline";
+                        font-family: App.headline-font;
                         font-size: 44px;
                         font-weight: 700;
                         color: root.ink;

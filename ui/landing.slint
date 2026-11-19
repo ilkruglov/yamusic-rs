@@ -31,7 +31,7 @@ component LHeader inherits Rectangle {
         y: has-cover ? 6px : 0px;
         height: 26px;
         text: block.title;
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: Theme.font-size-headline-m;
         font-weight: 700;
         color: Theme.controls-color-primary-text-enabled-variant;
@@ -278,7 +278,7 @@ component LikesHistory inherits Rectangle {
             x: 82px;
             y: 18px;
             text: c.title;
-            font-family: "YS Music Headline";
+            font-family: App.headline-font;
             font-size: Theme.font-size-headline-m;
             font-weight: 700;
             color: Theme.controls-color-primary-text-enabled-variant;
@@ -454,7 +454,7 @@ component NewReleases inherits Rectangle {
                     horizontal-alignment: center;
                     text: c.subtitle;
                     wrap: word-wrap;
-                    font-family: "YS Music Headline";
+                    font-family: App.headline-font;
                     font-size: Theme.font-size-headline-m;
                     font-weight: 700;
                     color: #e6e6e6;
@@ -694,7 +694,7 @@ export component ConcertTile inherits Rectangle {
                 width: parent.width;
                 horizontal-alignment: center;
                 text: card.day;
-                font-family: "YS Music Headline";
+                font-family: App.headline-font;
                 font-size: big ? 32px : 26px;
                 font-weight: 700;
                 color: #000000e6;
@@ -863,7 +863,7 @@ component Donations inherits Rectangle {
                 width: parent.width - 172px;
                 text: c.title;
                 overflow: elide;
-                font-family: "YS Music Headline";
+                font-family: App.headline-font;
                 font-size: 20px;
                 font-weight: 700;
                 color: Theme.controls-color-primary-text-enabled-variant;
@@ -919,7 +919,7 @@ component Special inherits Rectangle {
         y: 32px;
         width: 473px;
         text: block.title;
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: 32px;
         font-weight: 900;
         color: block.ink;
@@ -1110,7 +1110,7 @@ export component LandingPage inherits Rectangle {
                 height: 32px;
                 vertical-alignment: center;
                 text: App.landing-title;
-                font-family: "YS Music Headline";
+                font-family: App.headline-font;
                 font-size: 32px;
                 font-weight: 700;
                 color: Theme.controls-color-primary-text-enabled-variant;
@@ -1161,7 +1161,7 @@ export component LandingPage inherits Rectangle {
         x: root.pad;
         y: 12px;
         text: App.landing-title;
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: 22px;
         font-weight: 700;
         color: Theme.controls-color-primary-text-enabled-variant;
@@ -1236,7 +1236,7 @@ export component ChartPage inherits Rectangle {
         height: 32px;
         vertical-alignment: center;
         text: T.t("Чарт");
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: sticky ? 22px : 32px;
         font-weight: 700;
         color: Theme.controls-color-primary-text-enabled-variant;

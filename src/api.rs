@@ -39,6 +39,10 @@ pub struct Named {
 
 #[derive(Clone, Debug)]
 pub struct Track {
+    /// Альбом записи в исходном плейлисте, если указан отдельно от метаданных трека.
+    pub(crate) playlist_album_id: Option<String>,
+    /// Позиция в исходном списке при воспроизведении. У ручной вставки её нет.
+    pub(crate) list_position: Option<usize>,
     pub id: String,
     pub album_id: Option<String>,
     pub title: String,
@@ -246,6 +250,76 @@ fn join_names(a: &[Named]) -> String {
     a.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
+fn artist_track_pages(mut fetch: impl FnMut(usize) -> Res<Value>) -> Res<Vec<Track>> {
+    let mut out = Vec::new();
+    let mut pages = std::collections::HashSet::new();
+    let mut seen = 0;
+    for page in 0.. {
+        let response = fetch(page)?;
+        let tracks = response.get("tracks").and_then(Value::as_array).ok_or("нет списка треков исполнителя")?;
+        // Некоторые ответы повторяют несколько страниц по кругу.
+        let ids: Vec<_> = tracks.iter().map(|t| s(t.get("id"))).collect();
+        if tracks.is_empty() || !pages.insert(ids) {
+            break;
+        }
+        seen += tracks.len();
+        out.extend(tracks.iter().filter_map(parse_track));
+        let total = response.pointer("/pager/total").and_then(Value::as_u64);
+        if total.filter(|n| *n > 0).map_or(tracks.len() < 100, |n| seen >= n as usize) {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+#[test]
+fn artist_list_counts_unavailable_entries_and_reads_past_ten_pages() {
+    let tracks = artist_track_pages(|page| {
+        assert!(page <= 10);
+        Ok(json!({"pager":{"total": 11}, "tracks":[{"id":page, "available": page > 0, "title":"A"}]}))
+    }).unwrap();
+    assert_eq!(tracks.len(), 10);
+    assert_eq!(tracks.last().unwrap().id, "10");
+    let cyclic = artist_track_pages(|page| {
+        assert!(page < 3);
+        Ok(json!({"tracks":vec![json!({"id":page % 2,"title":"A"}); 100]}))
+    }).unwrap();
+    assert_eq!(cyclic.len(), 200);
+}
+
+fn playlist_entry_track(item: &Value, mut track: Track) -> Track {
+    track.playlist_album_id = s(item.get("albumId"));
+    track
+}
+
+fn playlist_remove_index(list: &Value, track: &Track) -> Res<usize> {
+    let items = list.get("tracks").and_then(Value::as_array).ok_or("нет списка треков")?;
+    let selected_album = track.playlist_album_id.as_ref().or(track.album_id.as_ref());
+    let mut matches = items.iter().enumerate().filter(|(_, item)| {
+        let id = s(item.get("id")).or_else(|| s(item.pointer("/track/id")));
+        let album = s(item.get("albumId")).or_else(|| s(item.pointer("/track/albums/0/id")));
+        id.as_ref() == Some(&track.id) && (album.is_none() || selected_album.is_none() || album.as_ref() == selected_album)
+    });
+    let (index, _) = matches.next().ok_or("трек уже отсутствует в плейлисте")?;
+    if matches.next().is_some() {
+        return Err("в плейлисте несколько совпадений, удаление отменено".into());
+    }
+    Ok(index)
+}
+
+#[cfg(test)]
+#[test]
+fn removal_uses_unfiltered_server_order() {
+    let track = parse_track(&json!({"id": 7, "title": "A"})).unwrap();
+    let list = json!({"tracks": [{"id": 1, "available": false}, {"track": {"id": 7}}]});
+    assert_eq!(playlist_remove_index(&list, &track), Ok(1));
+    let albums = json!({"tracks": [{"id":7,"albumId":11},{"id":7,"albumId":10}]});
+    let first = playlist_entry_track(&albums["tracks"][0], track.clone());
+    assert_eq!(playlist_remove_index(&albums, &first), Ok(0));
+    assert!(playlist_remove_index(&json!({"tracks": [{"id":7}, {"id":7}]}), &track).is_err());
+}
+
 pub(crate) fn parse_track(v: &Value) -> Option<Track> {
     if v.get("available").and_then(|x| x.as_bool()) == Some(false) {
         return None;
@@ -258,6 +332,8 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
     let li = v.get("lyricsInfo");
     let flag = |k: &str| li.and_then(|l| l.get(k)).and_then(|x| x.as_bool()).unwrap_or(false);
     Some(Track {
+        playlist_album_id: None,
+        list_position: None,
         id,
         album_id: album.and_then(|a| s(a.get("id"))),
         title,
@@ -1313,19 +1389,9 @@ impl Api {
     }
 
     pub fn artist_tracks(&self, id: &str) -> Res<Vec<Track>> {
-        let mut out = Vec::new();
-        for page in 0..10 {
-            let p = page.to_string();
-            let v = self.get(&format!("/artists/{id}/tracks"), &[("page", &p), ("page-size", "100")])?;
-            let got: Vec<Track> = v.get("tracks").and_then(|t| t.as_array()).map(|a| a.iter().filter_map(parse_track).collect()).unwrap_or_default();
-            let total = v.pointer("/pager/total").and_then(|t| t.as_u64()).unwrap_or(0) as usize;
-            let empty = got.is_empty();
-            out.extend(got);
-            if empty || out.len() >= total {
-                break;
-            }
-        }
-        Ok(out)
+        artist_track_pages(|page| {
+            self.get(&format!("/artists/{id}/tracks"), &[("page", &page.to_string()), ("page-size", "100")])
+        })
     }
 
     pub fn album(&self, id: &str) -> Res<(Album, Vec<Track>)> {
@@ -1343,10 +1409,14 @@ impl Api {
         let v = self.get(&format!("/users/{uid}/playlists/{kind}"), &[])?;
         let pl = parse_playlist(&v).ok_or("нет данных о плейлисте")?;
         let items = v.get("tracks").and_then(|t| t.as_array()).cloned().unwrap_or_default();
-        let mut tracks: Vec<Track> = items.iter().filter_map(|i| i.get("track").and_then(parse_track)).collect();
+        let mut tracks: Vec<Track> = items.iter().filter_map(|i| Some(playlist_entry_track(i, parse_track(i.get("track")?)?))).collect();
         if tracks.is_empty() && !items.is_empty() {
             let ids: Vec<String> = items.iter().filter_map(|i| s(i.get("id"))).collect();
-            tracks = self.tracks(&ids)?;
+            let found: std::collections::HashMap<_, _> = self.tracks(&ids)?.into_iter().map(|t| (t.id.clone(), t)).collect();
+            tracks = items.iter().filter_map(|item| {
+                let track = found.get(&s(item.get("id"))?)?;
+                Some(playlist_entry_track(item, track.clone()))
+            }).collect();
         }
         Ok((pl, tracks))
     }
@@ -1387,12 +1457,13 @@ impl Api {
         .map(|_| ())
     }
 
-    /// Удаляет трек на позиции `at`. Ревизия свежая по той же причине, что и при добавлении.
-    pub fn remove_from_playlist(&self, uid: &str, kind: &str, at: usize, t: &Track) -> Res<()> {
+    /// Индекс и ревизия должны относиться к одному снимку плейлиста.
+    pub fn remove_from_playlist(&self, uid: &str, kind: &str, t: &Track) -> Res<()> {
         let v = self.get(&format!("/users/{uid}/playlists/{kind}"), &[])?;
-        let revision = v.get("revision").and_then(|r| r.as_u64()).unwrap_or(1).to_string();
+        let revision = v.get("revision").and_then(Value::as_u64).ok_or("нет ревизии плейлиста")?.to_string();
+        let at = playlist_remove_index(&v, t)?;
         let mut item = json!({ "id": t.id });
-        if let Some(a) = &t.album_id {
+        if let Some(a) = t.playlist_album_id.as_ref().or(t.album_id.as_ref()) {
             item["albumId"] = json!(a);
         }
         let diff = json!([{ "op": "delete", "from": at, "to": at + 1, "tracks": [item] }]).to_string();

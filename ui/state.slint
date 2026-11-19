@@ -4,6 +4,7 @@
 export enum Page { wave, search, trends, concerts, nonmusic, collection, list, artist, artists, settings, grid, chart }
 
 export struct TrackItem {
+    track-id: string,
     title: string,
     version: string,
     artists: string,
@@ -134,6 +135,9 @@ export global T {
 }
 
 export global App {
+    in property <bool> fonts-loaded;
+    out property <string> text-font: fonts-loaded ? "YS Text" : "";
+    out property <string> headline-font: fonts-loaded ? "YS Music Headline" : "";
     in-out property <Page> page: Page.wave;
     in property <bool> maximized;
     // Слой на всё окно на один кадр: Slint перерисовывает место, где элемент появился и исчез,
@@ -180,6 +184,8 @@ export global App {
     in property <color> tint: #1c2a40;
     in property <color> accent: #3d5c8f;
     in property <bool> playing;
+    in property <bool> playback-paused;
+    in property <bool> can-pause;
     in property <bool> loading;
     in property <float> position;
     in property <float> duration;
@@ -388,6 +394,11 @@ export global App {
     in property <string> lang: "ru";
     in property <bool> less-ai;
     in property <string> download-dir;
+    in property <bool> asio-available;
+    in property <[string]> audio-outputs;
+    in-out property <int> audio-output-index;
+    in property <bool> audio-output-pending;
+    callback select-audio-output(int);
     // Режим работы: «Плавный» — анимации и кэш слоёв, «Лёгкий» — без них.
     in property <bool> motion: true;
     // Статус «Слушает» в профиле Discord и что с ним сейчас.

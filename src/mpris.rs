@@ -17,7 +17,6 @@ pub enum Event {
     Pause,
     Next,
     Prev,
-    Seek(f32),
     SeekBy(f32),
     Volume(f32),
     Raise,
@@ -64,8 +63,10 @@ async fn run(player: Player, on_event: impl Fn(Event) + 'static) -> mpris_server
     server.connect_quit(send(|| Event::Quit));
     let f = on_event.clone();
     server.connect_seek(move |_, offset| f(Event::SeekBy(secs(offset))));
-    let f = on_event.clone();
-    server.connect_set_position(move |_, _, pos| f(Event::Seek(secs(pos))));
+    let seek_player = player.clone();
+    server.connect_set_position(move |_, id, pos| {
+        seek_player.send(crate::player::Cmd::SeekTrack(id.clone(), pos.as_micros()));
+    });
     let f = on_event.clone();
     server.connect_set_volume(move |_, v| f(Event::Volume(v.clamp(0.0, 1.0) as f32)));
 
@@ -130,9 +131,33 @@ fn metadata(t: &Track, duration: f32) -> Metadata {
 }
 
 /// Путь объекта D-Bus для трека: в нём допустимы только буквы, цифры и `_`.
-fn track_id(id: &str) -> TrackId {
-    let safe: String = id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+pub(crate) fn track_id(id: &str) -> TrackId {
+    use std::fmt::Write as _;
+    let mut safe = String::new();
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            safe.push(char::from(byte));
+        } else {
+            write!(safe, "_{byte:02x}").unwrap();
+        }
+    }
     TrackId::try_from(format!("/io/github/spolzermod/yamusic_rs/track/t{safe}")).unwrap_or(TrackId::NO_TRACK)
+}
+
+pub(crate) fn can_set_position(t: &Track, requested: &TrackId, micros: i64) -> bool {
+    &track_id(&t.id) == requested && micros >= 0
+        && (t.duration_ms == 0 || (micros as u64) <= t.duration_ms.saturating_mul(1_000))
+}
+
+#[cfg(test)]
+#[test]
+fn set_position_is_scoped_to_the_playing_track() {
+    let mut t = crate::api::parse_track(&serde_json::json!({"id":1, "title":"T"})).unwrap();
+    assert!(!can_set_position(&t, &track_id("2"), 1_000_000));
+    assert!(can_set_position(&t, &track_id("1"), 1_000_000));
+    t.duration_ms = 2000;
+    assert!(!can_set_position(&t, &track_id("1"), 2_000_001));
+    assert!(!can_set_position(&t, &track_id("1"), -1));
 }
 
 fn time(secs: f32) -> Time {
@@ -151,5 +176,6 @@ mod tests {
         assert!(ok("12345"));
         assert!(ok("12345:678"));
         assert!(ok(""));
+        assert_ne!(super::track_id("1:2"), super::track_id("1_2"));
     }
 }

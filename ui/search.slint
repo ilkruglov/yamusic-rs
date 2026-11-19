@@ -84,7 +84,7 @@ export component SearchPage inherits Rectangle {
                 }
                 if !App.results-loading && App.sr-tracks.length == 0 && App.sr-artists.length == 0 && App.sr-albums.length == 0: Text {
                     text: T.t("Ничего не нашлось");
-                    font-family: "YS Music Headline";
+                    font-family: App.headline-font;
                     font-size: Theme.font-size-headline-s;
                     font-weight: 700;
                     color: Theme.controls-color-primary-text-enabled-variant;

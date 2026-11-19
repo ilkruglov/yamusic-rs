@@ -105,20 +105,20 @@ component FitTitle inherits Rectangle {
 
     property <length> w: root.width;
     property <length> h: root.height;
-    p104 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 104px; }
-    p96 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 96px; }
-    p88 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 88px; }
-    p80 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 80px; }
-    p72 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 72px; }
-    p64 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 64px; }
-    p56 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: "YS Music Headline"; font-weight: 700; font-size: 56px; }
-    w104 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 104px; }
-    w96 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 96px; }
-    w88 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 88px; }
-    w80 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 80px; }
-    w72 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 72px; }
-    w64 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 64px; }
-    w56 := Text { visible: false; text: root.longest; font-family: "YS Music Headline"; font-weight: 700; font-size: 56px; }
+    p104 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: App.headline-font; font-weight: 700; font-size: 104px; }
+    p96 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: App.headline-font; font-weight: 700; font-size: 96px; }
+    p88 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: App.headline-font; font-weight: 700; font-size: 88px; }
+    p80 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: App.headline-font; font-weight: 700; font-size: 80px; }
+    p72 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: App.headline-font; font-weight: 700; font-size: 72px; }
+    p64 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: App.headline-font; font-weight: 700; font-size: 64px; }
+    p56 := Text { visible: false; width: w; text: root.text; wrap: word-wrap; font-family: App.headline-font; font-weight: 700; font-size: 56px; }
+    w104 := Text { visible: false; text: root.longest; font-family: App.headline-font; font-weight: 700; font-size: 104px; }
+    w96 := Text { visible: false; text: root.longest; font-family: App.headline-font; font-weight: 700; font-size: 96px; }
+    w88 := Text { visible: false; text: root.longest; font-family: App.headline-font; font-weight: 700; font-size: 88px; }
+    w80 := Text { visible: false; text: root.longest; font-family: App.headline-font; font-weight: 700; font-size: 80px; }
+    w72 := Text { visible: false; text: root.longest; font-family: App.headline-font; font-weight: 700; font-size: 72px; }
+    w64 := Text { visible: false; text: root.longest; font-family: App.headline-font; font-weight: 700; font-size: 64px; }
+    w56 := Text { visible: false; text: root.longest; font-family: App.headline-font; font-weight: 700; font-size: 56px; }
 
     property <length> size:
           w104.preferred-width <= w && p104.preferred-height <= min(h, 4 * 104px * 1.25) ? 104px
@@ -138,12 +138,12 @@ component FitTitle inherits Rectangle {
         overflow: elide;
         horizontal-alignment: center;
         vertical-alignment: center;
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: root.size;
         font-weight: 700;
         color: #ffffff;
     }
-    line := Text { visible: false; text: root.text; font-family: "YS Music Headline"; font-weight: 700; font-size: root.size; }
+    line := Text { visible: false; text: root.text; font-family: App.headline-font; font-weight: 700; font-size: root.size; }
     // Кликабельна только сама надпись, а не пустое место вокруг.
     if root.link: TouchArea {
         width: min(w, line.preferred-width);
@@ -175,7 +175,7 @@ component ContextPill inherits Rectangle {
             overflow: elide;
             horizontal-alignment: center;
             vertical-alignment: center;
-            font-family: "YS Music Headline";
+            font-family: App.headline-font;
             font-size: Theme.font-size-headline-xs;
             font-weight: 700;
             color: Theme.logo-color-primary-player;
@@ -206,7 +206,7 @@ export component WavePage inherits Rectangle {
     property <length> text-w: root.width - text-x - 48px;
     property <length> cx: text-x + text-w / 2;
     property <length> blob: root.width * 0.6 * 1.107;
-    property <bool> paused: App.has-track && !App.playing;
+    property <bool> paused: App.has-track && App.playback-paused;
     property <length> title-y: App.wave-context ? 84px : 98px;
     // Высота окна и сдвиги по замерам оригинала при 700–1100: плеер прижат к низу (H − 248),
     // заголовок и пятно — к середине; ниже 800 отступы меньше.
@@ -283,7 +283,7 @@ export component WavePage inherits Rectangle {
         width: text-w;
         text: App.source-title;
         horizontal-alignment: center;
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: Theme.font-size-headline-s;
         font-weight: 700;
         color: #ffff00;
@@ -303,7 +303,7 @@ export component WavePage inherits Rectangle {
         width: text-w;
         text: T.t("Моя волна");
         horizontal-alignment: center;
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: 103px / App.ui-scale;
         font-weight: 700;
         color: #ffffff;
@@ -317,7 +317,7 @@ export component WavePage inherits Rectangle {
         border-radius: 32px;
         background: idle-ta.has-hover ? Theme.controls-color-primary-default-hovered : #ffff00;
         animate background { duration: App.motion ? 150ms : 0ms; }
-        Icon { source: Icons.play-big; size: 32px; colorize: #000; }
+        Icon { source: App.can-pause ? Icons.pause-big : Icons.play-big; size: 32px; colorize: #000; }
         idle-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-pause(); } }
     }
     if !App.has-track: Icon { x: cx - 76px - 12px; y: 600px + dp; source: Icons.prev; size: 24px; colorize: #ffffff14; }
@@ -394,7 +394,7 @@ export component WavePage inherits Rectangle {
                 text: App.title;
                 horizontal-alignment: center;
                 overflow: elide;
-                font-family: "YS Music Headline";
+                font-family: App.headline-font;
                 font-size: Theme.font-size-headline-xs;
                 font-weight: 700;
                 color: #ffffffb3;
@@ -458,7 +458,7 @@ export component WavePage inherits Rectangle {
             border-radius: 32px;
             background: play-ta.has-hover ? Theme.controls-color-primary-default-hovered : #ffff00;
             animate background { duration: App.motion ? 150ms : 0ms; }
-            Icon { source: App.playing ? Icons.pause-big : Icons.play-big; size: 32px; colorize: #000; }
+            Icon { source: App.can-pause ? Icons.pause-big : Icons.play-big; size: 32px; colorize: #000; }
             play-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-pause(); } }
         }
         Rectangle {

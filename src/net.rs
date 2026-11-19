@@ -162,6 +162,10 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
 }
 
 impl Net {
+    pub(crate) fn same_session(&self, other: &Net) -> bool {
+        Arc::ptr_eq(&self.store, &other.store)
+    }
+
     pub fn new(api: Api, uid: String, notify: Notify) -> Self {
         Net { api, uid, store: Default::default(), notify, toast: Default::default() }
     }
@@ -228,17 +232,19 @@ impl Net {
     /// «Слушать» у исполнителя: все его треки по кругу, начиная с `start`.
     pub fn play_artist(&self, player: &Player, id: &str, name: &str, start: Option<String>) {
         let (api, player, id, name, me) = (self.api.clone(), player.clone(), id.to_string(), name.to_string(), self.clone());
+        let request = player.begin_source_request();
         std::thread::spawn(move || match api.artist_tracks(&id) {
             Ok(tracks) => {
                 let start = start.and_then(|s| tracks.iter().position(|t| t.id == s)).unwrap_or(0);
-                player.send(Cmd::PlayList {
+                player.send_for_request(request, Cmd::PlayList {
                     source: Source::List { kind: ListKind::Artist, id, title: name },
                     tracks,
                     start,
                     after: After::Loop,
                 });
             }
-            Err(e) => me.say(format!("Не удалось загрузить треки исполнителя: {e}")),
+            Err(e) if player.is_current_request(request) => me.say(format!("Не удалось загрузить треки исполнителя: {e}")),
+            Err(_) => {}
         });
     }
 
@@ -268,4 +274,13 @@ mod tests {
         assert_eq!(tracks_word(11), "11 треков");
         assert_eq!(listeners_word(1964082), "1\u{2008}964\u{2008}082 слушателя в месяц");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn second_login_has_a_new_session_even_for_the_same_uid() {
+    let make = || Net::new(Api::new(""), "1".into(), Arc::new(|| {}));
+    let first = make();
+    assert!(first.same_session(&first.clone()));
+    assert!(!first.same_session(&make()));
 }

@@ -46,7 +46,7 @@ component QueueRow inherits Rectangle {
                 height: 24px;
                 border-radius: 12px;
                 background: #ffffff;
-                Icon { source: current && App.playing ? Icons.pause-filled-xs : Icons.play-filled-xs; size: 24px; colorize: #000000; }
+                Icon { source: current && App.can-pause ? Icons.pause-filled-xs : Icons.play-filled-xs; size: 24px; colorize: #000000; }
             }
         }
     }
@@ -145,7 +145,7 @@ component Poster inherits Rectangle {
                 border-radius: 34px;
                 background: play-ta.has-hover ? Theme.controls-color-primary-default-hovered : #ffff00;
                 animate background { duration: App.motion ? 150ms : 0ms; }
-                Icon { source: App.playing ? Icons.pause-m : Icons.play-m; size: 34px; colorize: #1a1a1ae6; }
+                Icon { source: App.can-pause ? Icons.pause-m : Icons.play-m; size: 34px; colorize: #1a1a1ae6; }
                 play-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-pause(); } }
             }
             RoundButton { x: 240px; y: 178px; size: 44px; icon: Icons.next-small; icon-size: 20px; clicked => { App.next(); } }
@@ -312,7 +312,7 @@ component LyricRow inherits Rectangle {
         text: root.text;
         wrap: word-wrap;
         horizontal-alignment: center;
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: root.font-size;
         font-weight: 700;
         color: #e6e6e6.with-alpha(root.alpha * root.fade);
@@ -373,7 +373,7 @@ component SyncLyrics inherits Rectangle {
         width: root.width;
         horizontal-alignment: center;
         text: T.t("Текста этой песни пока нет");
-        font-family: "YS Music Headline";
+        font-family: App.headline-font;
         font-size: root.font;
         font-weight: 700;
         color: #e6e6e6.with-alpha(0.5 * root.appear);
@@ -398,7 +398,7 @@ component SyncLyrics inherits Rectangle {
             if !root.scrolled && root.state == 1: Text {
                 text: App.lyric-counter;
                 horizontal-alignment: center;
-                font-family: "YS Music Headline";
+                font-family: App.headline-font;
                 font-size: root.font;
                 font-weight: 700;
                 color: #e6e6e6.with-alpha(0.5 * root.appear);
@@ -499,7 +499,7 @@ export component FullscreenPlayer inherits Rectangle {
             width: parent.width;
             text: App.queue-title;
             overflow: elide;
-            font-family: "YS Music Headline";
+            font-family: App.headline-font;
             font-size: Theme.font-size-headline-m;
             font-weight: 700;
             color: #ffffff;

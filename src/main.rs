@@ -4,6 +4,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+#[cfg(all(windows, feature = "asio"))]
+mod asio;
 mod assets;
 mod auth;
 mod client;
@@ -16,6 +18,8 @@ mod images;
 mod landing;
 #[cfg(target_os = "linux")]
 mod mpris;
+#[cfg(windows)]
+mod smtc;
 mod net;
 mod palette;
 mod player;

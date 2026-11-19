@@ -30,6 +30,9 @@ pub struct Config {
     pub theme: String,
     /// 0 превосходное, 1 оптимальное, 2 экономичное
     pub quality: u8,
+    /// Выбранный драйвер ASIO. Без него используется системный выход.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asio_driver: Option<String>,
     pub eq_on: bool,
     pub eq_preset: usize,
     pub eq_preamp: f32,
@@ -71,6 +74,7 @@ impl Default for Config {
             discord_app_id: String::new(),
             theme: "system".into(),
             quality: 0,
+            asio_driver: None,
             eq_on: false,
             eq_preset: 1,
             eq_preamp: 1.0,
@@ -136,7 +140,11 @@ impl Config {
     }
 
     pub fn save(&self) {
-        let _ = std::fs::create_dir_all(dir());
+        let _ = self.save_to_disk();
+    }
+
+    pub(crate) fn save_to_disk(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir())?;
         let mut disk = self.clone();
         // Токен не прочитался (связка ключей заперта) — запись о нём не трогаем, иначе после
         // разблокировки входить придётся заново. Стирают её только forget_token и forget_refresh.
@@ -148,19 +156,17 @@ impl Config {
         }
         // Спрятать некуда (Linux без связки ключей) — открытым текстом, в файле только для владельца.
         disk.token_plain = if disk.token_sealed.is_none() { self.token.clone() } else { None };
-        if let Ok(s) = serde_json::to_string_pretty(&disk) {
-            let path = dir().join("config.json");
-            let tmp = dir().join("config.json.tmp");
-            if std::fs::write(&tmp, s).is_ok() {
-                // Без DPAPI токен лежит открытым текстом: файл только для владельца.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-                }
-                let _ = std::fs::rename(&tmp, &path);
-            }
+        let json = serde_json::to_string_pretty(&disk).map_err(std::io::Error::other)?;
+        let path = dir().join("config.json");
+        let tmp = dir().join("config.json.tmp");
+        std::fs::write(&tmp, json)?;
+        // Без DPAPI токен лежит открытым текстом: файл только для владельца.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
         }
+        std::fs::rename(&tmp, &path)
     }
 
     /// Выход или токен отозван: убрать и из памяти, и с диска.
@@ -214,5 +220,22 @@ pub fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn audio_output_defaults_to_system_and_keeps_saved_driver() {
+        let old: Config = serde_json::from_str(r#"{"volume":0.5}"#).unwrap();
+        assert_eq!(old.volume, 0.5);
+        assert_eq!(old.asio_driver, None);
+
+        let configured: Config = serde_json::from_str(r#"{"asio_driver":"Cayin ASIO Driver"}"#).unwrap();
+        let saved = serde_json::to_string(&configured).unwrap();
+        let reopened: Config = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reopened.asio_driver.as_deref(), Some("Cayin ASIO Driver"));
+    }
 }
 
