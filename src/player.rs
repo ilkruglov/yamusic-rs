@@ -128,7 +128,7 @@ enum Msg {
     Cmd(Cmd),
     Account(u64, Res<Account>),
     Likes(u64, Res<Vec<String>>),
-    Batch { res: Res<Batch>, replace: bool, gen: u64 },
+    Batch { res: Res<Batch>, gen: u64 },
     Audio { gen: u64, res: Res<Vec<u8>> },
     Prefetch { generation: u64, id: String, res: Res<Vec<u8>> },
     LikeSaved { id: String, seq: u64, liked: bool, result: Res<()> },
@@ -442,6 +442,8 @@ struct Engine {
     wave_restored: bool,
     fetching: bool,
     batch_gen: u64,
+    // Выбранная станция заменяет старый трек, когда придёт первая пригодная запись.
+    starting_wave: bool,
     retry_at: Option<Instant>,
     gen: u64,
     loaded: bool,
@@ -502,6 +504,7 @@ impl Engine {
             wave_restored: false,
             fetching: false,
             batch_gen: 0,
+            starting_wave: false,
             retry_at: None,
             gen: 0,
             loaded: false,
@@ -729,6 +732,7 @@ impl Engine {
         self.prefetching = None;
         self.fetching = false;
         self.batch_gen += 1;
+        self.starting_wave = false;
         self.retry_at = None;
         self.batch_id.clear();
         self.session.clear();
@@ -765,6 +769,10 @@ impl Engine {
         self.sh().source = src;
     }
 
+    fn active_repeat(&self) -> Repeat {
+        if self.source.station().is_some() { Repeat::Off } else { self.repeat }
+    }
+
     /// Состояние движка → Shared для UI.
     fn sync(&mut self) {
         let playing = self.loaded && !self.paused && self.sink().map(|s| !s.is_paused()).unwrap_or(false);
@@ -775,7 +783,7 @@ impl Engine {
         s.paused = self.paused;
         s.position = pos;
         s.volume = self.volume;
-        s.repeat = self.repeat;
+        s.repeat = self.active_repeat();
         s.shuffle = self.shuffle;
         s.upcoming = upcoming;
     }
@@ -800,7 +808,7 @@ impl Engine {
             }
         }
         if self.loaded && !self.paused && self.sink().map(|s| s.empty()).unwrap_or(false) {
-            if self.repeat == Repeat::One && self.replay() {
+            if self.active_repeat() == Repeat::One && self.replay() {
                 return;
             }
             self.advance(End::Finished);
@@ -859,13 +867,13 @@ impl Engine {
                 Ok(ids) => self.merge_likes(ids),
                 Err(e) => log(format!("likes: {e}")),
             },
-            Msg::Batch { res, replace, gen } => {
+            Msg::Batch { res, gen } => {
                 if gen != self.batch_gen {
                     return;
                 }
                 self.fetching = false;
                 match res {
-                    Ok(b) => self.on_batch(b, replace),
+                    Ok(b) => self.on_batch(b, crate::api::allow_explicit()),
                     Err(e) => {
                         self.error(format!("Не удалось получить треки волны: {e}"));
                         self.retry_at = Some(Instant::now() + Duration::from_secs(5));
@@ -1000,7 +1008,7 @@ impl Engine {
                 }
                 self.advance(End::Dislike);
             }
-            Cmd::Wave(src) => self.start_wave(src, true),
+            Cmd::Wave(src) => self.start_wave(src),
             Cmd::PlayList { source, mut tracks, start, after } => {
                 for (index, track) in tracks.iter_mut().enumerate() { track.list_position = Some(index); }
                 if tracks.is_empty() {
@@ -1126,28 +1134,22 @@ impl Engine {
 
     // ---------- очередь ----------
 
-    fn start_wave(&mut self, src: Source, fetch: bool) {
+    fn start_wave(&mut self, src: Source) {
         self.clear_queue();
         self.list = None;
         self.set_source(src);
+        self.starting_wave = true;
         self.feedback("radioStarted", None, None);
-        if fetch {
-            self.fetch_batch_with(true);
-        }
+        self.fetch_batch();
     }
 
     fn fetch_batch(&mut self) {
-        self.fetch_batch_with(false);
-    }
-
-    fn fetch_batch_with(&mut self, replace: bool) {
-        if self.fetching || self.list.is_some() {
+        if self.fetching || self.retry_at.is_some() || self.list.is_some() {
             return;
         }
         let Some(station) = self.source.station().map(String::from) else { return };
         let Some(api) = self.api.clone() else { return };
         self.fetching = true;
-        self.retry_at = None;
         if self.played_station != station {
             self.played_station = station.clone();
             self.played.clear();
@@ -1171,11 +1173,11 @@ impl Engine {
         // В очереди фонового потока: запрос уйдёт после уже отправленных фидбеков.
         let _ = self.bg.send(Box::new(move || {
             let res = api.wave_session(&station, Some(&session), &queue, &feedbacks);
-            let _ = tx.send(Msg::Batch { res, replace, gen });
+            let _ = tx.send(Msg::Batch { res, gen });
         }));
     }
 
-    fn on_batch(&mut self, b: Batch, replace: bool) {
+    fn on_batch(&mut self, b: Batch, allow_explicit: bool) {
         self.batch_id = b.batch_id;
         if !b.session.is_empty() {
             // Сессия могла подхватиться с прошлого запуска — radioStarted нужен и ей.
@@ -1189,38 +1191,49 @@ impl Engine {
             }
         }
         self.merge_likes(b.liked);
-        if replace {
-            self.queue.clear();
-            self.prefetch = None;
+        let replace = self.starting_wave;
+        if !allow_explicit {
+            self.queue.retain(|t| !t.explicit);
         }
-        let queued = |t: &Track| {
-            self.queue.iter().any(|q| q.id == t.id) || (!replace && self.current.as_ref().is_some_and(|c| c.id == t.id))
-        };
-        // Сервер иногда возвращает недавно сыгранные треки — их пропускаем. Если весь пакет
-        // из повторов, просим ещё (до двух раз подряд), а потом берём как есть, чтобы не замолчать.
-        let check_history = !replace || self.source == Source::Wave;
-        let played = |t: &Track| {
-            self.history.iter().any(|h| h.id == t.id) || self.played.iter().any(|p| p.split(':').next() == Some(t.id.as_str()))
-        };
-        let no_explicit = !crate::api::allow_explicit();
-        let skip = |t: &Track| queued(t) || (check_history && played(t)) || (no_explicit && t.explicit);
-        let fresh: Vec<Track> = b
-            .tracks
-            .iter()
-            .filter(|t| !skip(t))
-            .cloned()
-            .collect();
-        let tracks = if !fresh.is_empty() || b.tracks.iter().all(&queued) {
+        let my_wave = self.source.station() == Some(WAVE);
+        let mut seen: HashSet<&str> = self.queue.iter().map(|t| t.id.as_str()).collect();
+        if my_wave || !replace {
+            seen.extend(self.current.iter().map(|t| t.id.as_str()));
+        }
+        let mut played: HashSet<&str> = HashSet::new();
+        if my_wave || !replace {
+            played.extend(self.history.iter().map(|t| t.id.as_str()));
+            played.extend(self.played.iter().map(|id| id.split(':').next().unwrap_or(id)));
+        }
+        let (fresh, recent): (Vec<_>, Vec<_>) = b.tracks.iter()
+            .filter(|t| (allow_explicit || !t.explicit) && seen.insert(&t.id))
+            .partition(|t| !played.contains(t.id.as_str()));
+        let tracks = if !fresh.is_empty() {
             fresh
+        } else if !self.queue.is_empty() {
+            // Уже есть что играть. Следующий переход снова пополнит очередь.
+            Vec::new()
         } else if self.stale_batches < 2 {
             self.stale_batches += 1;
-            self.fetch_batch_with(replace);
+            self.fetch_batch();
             return;
+        } else if !my_wave && !recent.is_empty() {
+            // У узкой станции (например, по одному исполнителю) может закончиться каталог.
+            recent
         } else {
-            b.tracks.iter().filter(|t| !queued(t)).cloned().collect()
+            if my_wave && self.current.is_none() && self.stale_batches == 2 && !self.session.is_empty() {
+                // Одинаковая история в той же сессии может давать один и тот же пакет.
+                self.flush_feedback();
+                self.session.clear();
+                self.radio_started_pending = true;
+                self.stale_batches += 1;
+                self.error("В подборке нет подходящих треков. Обновляю Волну.");
+            }
+            self.retry_at = Some(Instant::now() + Duration::from_secs(5));
+            return;
         };
         self.stale_batches = 0;
-        self.queue.extend(tracks);
+        self.queue.extend(tracks.into_iter().cloned());
         if replace {
             self.advance(End::Restart);
         } else if self.current.is_none() {
@@ -1325,6 +1338,8 @@ impl Engine {
             self.flush_feedback();
             self.session.clear();
             self.fetching = false;
+            self.retry_at = None;
+            self.stale_batches = 0;
             self.batch_gen += 1;
         }
         if skip_current {
@@ -1396,6 +1411,7 @@ impl Engine {
     // ---------- загрузка ----------
 
     fn start_current(&mut self) {
+        self.starting_wave = false;
         self.position_base = Duration::ZERO;
         self.gen += 1;
         self.loaded = false;
@@ -1582,6 +1598,118 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wave_engine() -> Engine {
+        let (tx, _) = mpsc::channel();
+        Engine::new(tx, Arc::default(), Arc::default(), Arc::new(|| {}), Arc::default(), None)
+    }
+
+    fn wave_batch(ids: &[&str]) -> Batch {
+        let tracks = ids.iter().map(|id| {
+            crate::api::parse_track(&serde_json::json!({"id": id, "title": id})).unwrap()
+        }).collect();
+        Batch { tracks, liked: vec![], batch_id: "batch".into(), session: "station".into() }
+    }
+
+    #[test]
+    fn wave_never_requeues_recent_tracks_after_repeated_batches() {
+        let mut engine = wave_engine();
+        engine.played = vec!["old:album".into()];
+        engine.current = wave_batch(&["current"]).tracks.pop();
+        for _ in 0..3 {
+            engine.on_batch(wave_batch(&["old", "current"]), true);
+        }
+        assert!(engine.queue.is_empty());
+        assert!(engine.retry_at.is_some());
+        engine.on_batch(wave_batch(&["old", "new", "new", "another"]), true);
+        let queued: Vec<_> = engine.queue.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(queued, ["new", "another"]);
+    }
+
+    #[test]
+    fn starting_my_wave_waits_for_a_different_song() {
+        let mut engine = wave_engine();
+        engine.current = wave_batch(&["current"]).tracks.pop();
+        engine.start_wave(Source::Wave);
+        for _ in 0..3 {
+            engine.on_batch(wave_batch(&["current"]), true);
+        }
+        assert!(engine.retry_at.unwrap() > Instant::now());
+        engine.retry_at = Some(Instant::now());
+        engine.tick();
+        assert!(engine.retry_at.is_none());
+        engine.handle(Msg::Batch { res: Ok(wave_batch(&["next"])), gen: engine.batch_gen });
+        assert_eq!(engine.current.as_ref().unwrap().id, "next");
+    }
+
+    #[test]
+    fn wave_keeps_a_manual_queue_entry_when_the_batch_duplicates_it() {
+        let mut engine = wave_engine();
+        engine.current = wave_batch(&["current"]).tracks.pop();
+        engine.queue.extend(wave_batch(&["manual"]).tracks);
+        engine.on_batch(wave_batch(&["manual", "manual"]), true);
+        assert_eq!(engine.queue.len(), 1);
+        assert_eq!(engine.queue[0].id, "manual");
+        assert!(engine.retry_at.is_none());
+    }
+
+    #[test]
+    fn restarting_wave_preserves_play_next_during_delayed_retry() {
+        let mut engine = wave_engine();
+        engine.current = wave_batch(&["current"]).tracks.pop();
+        engine.start_wave(Source::Wave);
+        engine.handle(Msg::Batch { res: Err("offline".into()), gen: engine.batch_gen });
+        engine.retry_at = Some(Instant::now());
+        engine.tick();
+        let track = wave_batch(&["manual"]).tracks.pop().unwrap();
+        engine.cmd(Cmd::Enqueue { track, next: true });
+        engine.on_batch(wave_batch(&["next"]), true);
+        assert_eq!(engine.current.as_ref().unwrap().id, "manual");
+        assert_eq!(engine.queue.front().unwrap().id, "next");
+    }
+
+    #[test]
+    fn wave_requests_a_new_session_if_the_empty_queue_keeps_getting_repeats() {
+        let mut engine = wave_engine();
+        engine.played.push("old:album".into());
+        for _ in 0..3 {
+            engine.on_batch(wave_batch(&["old"]), true);
+        }
+        assert!(engine.session.is_empty());
+        assert!(engine.radio_started_pending);
+        assert!(engine.retry_at.is_some());
+        assert_eq!(engine.played, ["old:album"]);
+        engine.on_batch(wave_batch(&["fresh"]), true);
+        assert_eq!(engine.current.unwrap().id, "fresh");
+    }
+
+    #[test]
+    fn blocked_manual_track_cannot_interrupt_a_pending_wave_start() {
+        let mut engine = wave_engine();
+        engine.current = wave_batch(&["current"]).tracks.pop();
+        engine.start_wave(Source::Wave);
+        let mut blocked = wave_batch(&["blocked"]).tracks.pop().unwrap();
+        blocked.explicit = true;
+        engine.cmd(Cmd::Enqueue { track: blocked, next: true });
+        engine.on_batch(wave_batch(&["current"]), false);
+        assert_eq!(engine.current.as_ref().unwrap().id, "current");
+        assert!(engine.starting_wave);
+    }
+
+    #[test]
+    fn wave_suspends_single_track_repeat_from_a_list() {
+        let mut engine = wave_engine();
+        let album = Source::List { kind: ListKind::Album, id: "1".into(), title: "Album".into() };
+        engine.set_source(album.clone());
+        engine.cmd(Cmd::Repeat(Repeat::One));
+        engine.start_wave(Source::Wave);
+        engine.sync();
+        assert_eq!(engine.sh().repeat, Repeat::Off);
+        engine.set_source(album);
+        engine.sync();
+        assert_eq!(engine.sh().repeat, Repeat::One);
+    }
+
 
     #[test]
     fn late_account_reply_after_logout_keeps_media_closed() {
