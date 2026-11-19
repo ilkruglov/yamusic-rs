@@ -67,9 +67,17 @@ export component ListPage inherits Rectangle {
     }
 
     flick := Flickable {
-        content-height: rows-y + App.tracks.length * row-h + (album && App.list-label != "" ? 80px : 32px);
+        content-height: rows-y + App.list-count * row-h + (album && App.list-label != "" ? 80px : 32px);
         property <int> first: max(0, floor((-self.content-y - rows-y) / row-h));
-        property <int> shown-rows: min(App.tracks.length - first, ceil(self.height / row-h) + 2);
+        property <int> capacity: ceil(self.height / row-h) + 2;
+        changed content-height => {
+            if self.content-y < min(0px, self.height - self.content-height) {
+                self.content-y = min(0px, self.height - self.content-height);
+            }
+        }
+        init => { App.list-viewport(first, capacity); }
+        changed first => { App.list-viewport(first, capacity); }
+        changed capacity => { App.list-viewport(first, capacity); }
 
         Cover {
             x: pad;
@@ -397,17 +405,15 @@ export component ListPage inherits Rectangle {
             }
         }
 
-        for k in max(0, shown-rows): Rectangle {
-            property <int> idx: flick.first + k;
+        for k in App.tracks.length: Rectangle {
+            property <int> idx: App.list-first + k;
             x: row-x;
             y: rows-y + idx * row-h;
             width: parent.width - row-x - 33px;
             height: row-h;
-            init => { App.request-cover(idx); }
-            changed idx => { App.request-cover(idx); }
             if !album: TrackRow {
                 width: parent.width;
-                item: App.tracks[idx];
+                item: App.tracks[k];
                 block: "list";
                 index: idx;
                 current: idx == App.list-current;
@@ -417,7 +423,7 @@ export component ListPage inherits Rectangle {
                 remove => { App.list-remove-track(idx); }
             }
             if album: Rectangle {
-                property <TrackItem> item: App.tracks[idx];
+                property <TrackItem> item: App.tracks[k];
                 property <bool> current: idx == App.list-current;
                 border-radius: Theme.radius-size-m;
                 property <bool> hot: ta.has-hover || like-ta.has-hover || more-ta.has-hover;
@@ -501,7 +507,7 @@ export component ListPage inherits Rectangle {
         if album && App.list-label != "": HorizontalLayout {
             x: pad;
             width: self.preferred-width;
-            y: rows-y + App.tracks.length * row-h + 24px;
+            y: rows-y + App.list-count * row-h + 24px;
             height: 21px;
             spacing: 3px;
             Text { text: T.t("Лейбл:"); font-size: Theme.font-size-label-s; color: Theme.controls-color-primary-text-enabled; vertical-alignment: center; }

@@ -18,6 +18,7 @@ pub enum Event {
     Next,
     Prev,
     SeekBy(f32),
+    SeekTrack(TrackId, i64),
     Volume(f32),
     Raise,
     Quit,
@@ -63,9 +64,9 @@ async fn run(player: Player, on_event: impl Fn(Event) + 'static) -> mpris_server
     server.connect_quit(send(|| Event::Quit));
     let f = on_event.clone();
     server.connect_seek(move |_, offset| f(Event::SeekBy(secs(offset))));
-    let seek_player = player.clone();
+    let f = on_event.clone();
     server.connect_set_position(move |_, id, pos| {
-        seek_player.send(crate::player::Cmd::SeekTrack(id.clone(), pos.as_micros()));
+        f(Event::SeekTrack(id.clone(), pos.as_micros()));
     });
     let f = on_event.clone();
     server.connect_set_volume(move |_, v| f(Event::Volume(v.clamp(0.0, 1.0) as f32)));
@@ -178,4 +179,35 @@ mod tests {
         assert!(ok(""));
         assert_ne!(super::track_id("1:2"), super::track_id("1_2"));
     }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires dbus-run-session and gdbus"]
+fn transport_delivers_position_in_command_order() {
+    use std::{process::Command, sync::{mpsc, Arc}};
+    const BUS: &str = "org.mpris.MediaPlayer2.yamusic_rs";
+    const CHILD: &str = "YAMUSIC_MPRIS_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = Command::new("dbus-run-session")
+            .arg("--").arg(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "mpris::transport_delivers_position_in_command_order"])
+            .env(CHILD, "1").status().unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let (tx, rx) = mpsc::channel();
+    spawn(Player::spawn(Arc::new(|| {}), None), move |event| { let _ = tx.send(event); });
+    assert!(Command::new("gdbus").args(["wait", "--session", "--timeout", "10", BUS]).status().unwrap().success());
+    for (method, args) in [("Previous", vec![]), ("SetPosition", vec!["/song", "30000000"]), ("Seek", vec!["2000000"])] {
+        let output = Command::new("gdbus")
+            .args(["call", "--session", "--dest", BUS, "--object-path", "/org/mpris/MediaPlayer2", "--method"])
+            .arg(format!("org.mpris.MediaPlayer2.Player.{method}")).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let next = || rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(matches!(next(), Event::Prev));
+    assert!(matches!(next(), Event::SeekTrack(id, 30_000_000) if id.as_str() == "/song"));
+    assert!(matches!(next(), Event::SeekBy(seconds) if seconds == 2.0));
 }

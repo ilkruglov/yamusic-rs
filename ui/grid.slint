@@ -16,7 +16,17 @@ export component GridPage inherits Rectangle {
         property <int> cols: max(2, floor((w + 24px) / 228px));
         property <length> size: (w - (cols - 1) * 24px) / cols;
         property <length> top: App.grid-tabs.length > 1 ? 133px : 97px;
-        property <int> n: App.grid-cards.length + (App.grid-create ? 1 : 0);
+        property <int> n: App.grid-count + (App.grid-create ? 1 : 0);
+        property <int> first: max(0, (floor((-self.content-y - top) / (size + 112px)) - 1) * cols - (App.grid-create ? 1 : 0));
+        property <int> capacity: (ceil(self.height / (size + 112px)) + 4) * cols;
+        changed content-height => {
+            if self.content-y < min(0px, self.height - self.content-height) {
+                self.content-y = min(0px, self.height - self.content-height);
+            }
+        }
+        init => { App.grid-viewport(first, capacity); }
+        changed first => { App.grid-viewport(first, capacity); }
+        changed capacity => { App.grid-viewport(first, capacity); }
         content-height: top + ceil(n / cols) * (size + 112px) + 24px;
 
         if App.can-back: NavCircle {
@@ -51,7 +61,7 @@ export component GridPage inherits Rectangle {
         }
 
         // «Новый плейлист» — первая карточка во вкладке «Вы собрали».
-        if App.grid-create: Rectangle {
+        if App.grid-create && flick.first == 0: Rectangle {
             x: pad;
             y: flick.top;
             width: flick.size;
@@ -76,13 +86,14 @@ export component GridPage inherits Rectangle {
                 clicked => { App.create-playlist(); }
             }
         }
-        for c[i] in App.grid-cards: CardTile {
-            property <int> k: i + (App.grid-create ? 1 : 0);
+        for i in App.grid-cards.length: CardTile {
+            property <int> idx: App.grid-first + i;
+            property <int> k: idx + (App.grid-create ? 1 : 0);
             x: pad + mod(k, flick.cols) * (flick.size + 24px);
             y: flick.top + floor(k / flick.cols) * (flick.size + 112px);
             size: flick.size;
-            item: c;
-            clicked => { App.open-card("grid", i); }
+            item: App.grid-cards[i];
+            clicked => { App.open-card("grid", idx); }
         }
     }
 }

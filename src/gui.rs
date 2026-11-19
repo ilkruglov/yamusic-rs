@@ -43,9 +43,39 @@ fn repeated_entity_clicks_settle_on_the_last_choice() {
     assert!(pending.desired && pending.confirmed);
 }
 
+fn merge_entity_likes(kind: &'static str, fresh: &mut std::collections::HashSet<String>,
+    saved: &HashMap<(&'static str, String), bool>, pending_likes: &mut HashMap<(&'static str, String), EntityLike>) {
+    for ((k, key), &confirmed) in saved {
+        if *k == kind {
+            if confirmed { fresh.insert(key.clone()); } else { fresh.remove(key); }
+        }
+    }
+    for ((k, id), pending) in pending_likes {
+        if *k == kind {
+            let key = if kind == "playlists" { format!("playlist:{id}") } else { id.clone() };
+            pending.confirmed = fresh.contains(&key);
+            if pending.desired { fresh.insert(key); } else { fresh.remove(&key); }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn stale_snapshot_cannot_erase_confirmed_like_during_unlike() {
+    let id = ("albums", String::from("1"));
+    let saved = HashMap::from([(id.clone(), true)]);
+    let mut pending = HashMap::from([(id.clone(), EntityLike { confirmed: true, desired: false })]);
+    let mut snapshot = Default::default();
+    merge_entity_likes("albums", &mut snapshot, &saved, &mut pending);
+    assert!(snapshot.is_empty());
+    let like = pending.get_mut(&id).unwrap();
+    assert_eq!(like.complete(false, false), None);
+    assert!(like.desired);
+}
+
 struct State {
     entity_likes: HashMap<(&'static str, String), EntityLike>,
-    saved_entities: std::collections::HashSet<(&'static str, String)>,
+    saved_entities: HashMap<(&'static str, String), bool>,
     cfg: Config,
     dark: bool,
     uid: String,
@@ -69,6 +99,7 @@ struct State {
     list_key: Option<String>,
     list_shown: Option<Arc<Data>>,
     view: Vec<usize>,
+    search_index: Vec<(String, String)>,
     history: Vec<(Page, Option<String>)>,
     forward: Vec<(Page, Option<String>)>,
     track_id: Option<String>,
@@ -127,7 +158,8 @@ struct Ctx {
     volume_save_at: Cell<Option<Instant>>,
     discord: Arc<crate::discord::Discord>,
     images: Images,
-    tracks: Rc<VecModel<TrackItem>>,
+    list_window: Cell<(usize, usize)>,
+    grid_window: Cell<(usize, usize)>,
     st: RefCell<State>,
 }
 
@@ -219,6 +251,22 @@ fn date_ru(iso: &str) -> String {
         format!("{d} {}", MONTHS[m as usize - 1])
     } else {
         format!("{d} {} {y}", MONTHS[m as usize - 1])
+    }
+}
+
+fn previous_row<T: Clone + 'static>(model: &ModelRc<T>, first: i32, index: usize) -> Option<T> {
+    model.row_data(index.checked_sub(first as usize)?)
+}
+
+fn card_item(c: &Card) -> CardItem {
+    CardItem {
+        title: c.title.clone().into(),
+        subtitle: c.subtitle.clone().into(),
+        round: c.round,
+        year: c.year.clone().into(),
+        likes: c.likes.map(group_digits).unwrap_or_default().into(),
+        explicit: c.explicit,
+        ..Default::default()
     }
 }
 
@@ -541,8 +589,10 @@ impl Ctx {
                         st.list_key = Some(k);
                         st.list_shown = None;
                         st.view.clear();
+                        st.search_index.clear();
                         drop(st);
-                        self.tracks.set_vec(Vec::new());
+                        app.set_list_count(0);
+                        app.set_tracks(ModelRc::default());
                         app.set_list_filter(SharedString::new());
                         app.set_list_edit(0);
                         app.set_list_desc_raw(SharedString::new());
@@ -606,6 +656,7 @@ impl Ctx {
         let title = self.st.borrow().grid_titles.get(&key).cloned().unwrap_or_default();
         app.set_grid_title(title.into());
         app.set_grid_tabs(ModelRc::default());
+        app.set_grid_count(0);
         app.set_grid_cards(ModelRc::default());
         app.set_grid_create(false);
         {
@@ -647,9 +698,10 @@ impl Ctx {
     fn show_grid_tab(self: &Rc<Self>) {
         let ui = self.ui();
         let app = ui.global::<App>();
-        let (names, cards, tab, playlists) = {
-            let st = self.st.borrow();
+        let (names, count, tab, playlists) = {
+            let mut st = self.st.borrow_mut();
             let tab = st.grid_tab.min(st.grid.len().saturating_sub(1));
+            st.grid_tab = tab;
             // Счётчик — только у выбранной вкладки: «Альбомы • 54».
             let names: Vec<SharedString> = st
                 .grid
@@ -657,14 +709,41 @@ impl Ctx {
                 .enumerate()
                 .map(|(i, (t, items))| if i == tab { format!("{t} • {}", items.len()) } else { t.clone() }.into())
                 .collect();
-            let cards = st.grid.get(tab).map(|t| t.1.clone()).unwrap_or_default();
-            (names, cards, tab, st.grid_key.as_deref() == Some("playlists"))
+            let count = st.grid.get(tab).map_or(0, |t| t.1.len());
+            (names, count, tab, st.grid_key.as_deref() == Some("playlists"))
         };
         app.set_grid_tabs(ModelRc::from(Rc::new(VecModel::from(names))));
         app.set_grid_tab(tab as i32);
         app.set_grid_create(playlists && tab == 0);
-        let model = self.card_model("grid", &cards, 204.0);
-        app.set_grid_cards(model);
+        app.set_grid_count(count as i32);
+        self.show_grid_window(false);
+    }
+
+    fn show_grid_window(&self, scrolling: bool) {
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        let (first, capacity) = self.grid_window.get();
+        let cards = {
+            let st = self.st.borrow();
+            let cards = st.grid.get(st.grid_tab).map(|(_, cards)| cards.as_slice()).unwrap_or_default();
+            cards.iter().skip(first).take(capacity).cloned().collect::<Vec<_>>()
+        };
+        self.images.cancel_pending();
+        let previous = if scrolling { app.get_grid_cards() } else { ModelRc::default() };
+        let previous_first = app.get_grid_first();
+        let rows = cards.iter().enumerate().map(|(i, item)| {
+            previous_row(&previous, previous_first, first + i).unwrap_or_else(|| card_item(item))
+        }).collect::<Vec<_>>();
+        let model = Rc::new(VecModel::from(rows));
+        app.set_grid_first(first as i32);
+        app.set_grid_cards(ModelRc::from(model.clone()));
+        let size = self.size_for(204.0);
+        for (i, card) in cards.iter().enumerate().rev() {
+            if model.row_data(i).is_some_and(|row| row.cover.size().width > 0) { continue; }
+            if let Some(uri) = card.covers.first() {
+                self.viewport_cover(&model, i, &crate::api::pic(uri, size), size, |row, img| row.cover = img);
+            }
+        }
     }
 
     /// «Исполнители»: топ месяца из коллекции и понравившиеся — отдельным запросом.
@@ -912,6 +991,7 @@ impl Ctx {
                 }
                 self.st.borrow_mut().list_shown = Some(data.clone());
                 if let Data::List(l) = &*data {
+                    self.st.borrow_mut().search_index = l.tracks.iter().map(|t| (t.title.to_lowercase(), t.artists.to_lowercase())).collect();
                     self.show_list_header(l);
                     self.apply_filter();
                 }
@@ -1032,20 +1112,20 @@ impl Ctx {
     fn apply_filter(self: &Rc<Self>) {
         let Some(data) = self.list() else { return };
         let Data::List(l) = &*data else { return };
-        let q = self.ui().global::<App>().get_list_filter().to_lowercase();
-        let view: Vec<usize> = l
-            .tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| q.is_empty() || t.title.to_lowercase().contains(&q) || t.artists.to_lowercase().contains(&q))
-            .map(|(i, _)| i)
-            .collect();
-        let items: Vec<TrackItem> = view
-            .iter()
-            .map(|&i| self.track_item(&l.tracks[i]))
-            .collect();
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        let query = app.get_list_filter().to_lowercase();
+        let view = if query.is_empty() {
+            (0..l.tracks.len()).collect::<Vec<_>>()
+        } else {
+            self.st.borrow().search_index.iter().enumerate()
+                .filter(|(_, (title, artists))| title.contains(&query) || artists.contains(&query))
+                .map(|(i, _)| i).collect()
+        };
+        let count = view.len();
         self.st.borrow_mut().view = view;
-        self.tracks.set_vec(items);
+        app.set_list_count(count as i32);
+        self.show_list_window(false);
         self.update_list_current();
     }
 
@@ -1083,24 +1163,41 @@ impl Ctx {
         app.set_list_current(cur.map(|i| i as i32).unwrap_or(-1));
     }
 
-    fn request_cover(self: &Rc<Self>, i: usize) {
-        let Some(row) = self.tracks.row_data(i) else { return };
-        if row.cover.size().width > 0 {
-            return;
-        }
-        let Some(t) = self.view_track(i) else { return };
+    fn show_list_window(&self, scrolling: bool) {
+        let Some(data) = self.list() else { return };
+        let Data::List(list) = &*data else { return };
+        let ui = self.ui();
+        let app = ui.global::<App>();
+        let (first, capacity) = self.list_window.get();
+        let st = self.st.borrow();
+        let tracks: Vec<_> = st.view.iter().skip(first).take(capacity).map(|&i| &list.tracks[i]).collect();
+        drop(st);
+        let previous = if scrolling { app.get_tracks() } else { ModelRc::default() };
+        let previous_first = app.get_list_first();
+        let rows = tracks.iter().enumerate().map(|(i, item)| {
+            previous_row(&previous, previous_first, first + i).unwrap_or_else(|| self.track_item(item))
+        }).collect::<Vec<_>>();
+        let model = Rc::new(VecModel::from(rows));
+        self.images.cancel_pending();
+        app.set_list_first(first as i32);
+        app.set_tracks(ModelRc::from(model.clone()));
         let size = self.size_for(40.0);
-        let Some(url) = t.cover_url(size) else { return };
-        let model = self.tracks.clone();
-        self.images.get_cancellable(&url, size, move |img| {
-            with_ctx(|c| {
-                if c.view_track(i).is_some_and(|x| x.id == t.id) {
-                    if let Some(mut row) = model.row_data(i) {
-                        row.cover = img.clone();
-                        model.set_row_data(i, row);
-                    }
-                }
-            })
+        for (i, track) in tracks.iter().enumerate().rev() {
+            if model.row_data(i).is_some_and(|row| row.cover.size().width > 0) { continue; }
+            if let Some(url) = track.cover_url(size) {
+                self.viewport_cover(&model, i, &url, size, |row, img| row.cover = img);
+            }
+        }
+    }
+
+    fn viewport_cover<T: Clone + 'static>(&self, model: &Rc<VecModel<T>>, i: usize, url: &str, size: u32, set: impl FnOnce(&mut T, Image) + 'static) {
+        let weak = Rc::downgrade(model);
+        self.images.get_cancellable(url, size, move |img| {
+            let Some(model) = weak.upgrade() else { return };
+            if let Some(mut row) = model.row_data(i) {
+                set(&mut row, img.clone());
+                model.set_row_data(i, row);
+            }
         });
     }
 
@@ -1646,9 +1743,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         player.send(Cmd::Login(t));
     }
 
-    let tracks = Rc::new(VecModel::<TrackItem>::default());
     let app = ui.global::<App>();
-    app.set_tracks(ModelRc::from(tracks.clone()));
     app.set_version(env!("CARGO_PKG_VERSION").into());
     app.set_app_name(env!("APP_NAME").into());
     app.set_theme_mode(cfg.theme.clone().into());
@@ -1676,7 +1771,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         volume_save_at: Cell::new(None),
         discord,
         images: Images::new(lite),
-        tracks,
+        list_window: Cell::default(),
+        grid_window: Cell::default(),
         st: RefCell::new(State {
             entity_likes: HashMap::new(),
             saved_entities: Default::default(),
@@ -1701,6 +1797,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             list_key: None,
             list_shown: None,
             view: Vec::new(),
+            search_index: Vec::new(),
             history: Vec::new(),
             forward: Vec::new(),
             track_id: None,
@@ -1883,13 +1980,29 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         with_ctx(|c| {
             let Some(t) = c.view_track(i as usize) else { return };
             c.like(t);
-            if let Some(mut row) = c.tracks.row_data(i as usize) {
-                row.liked = !row.liked;
-                c.tracks.set_row_data(i as usize, row);
+            let ui = c.ui();
+            let app = ui.global::<App>();
+            let model = app.get_tracks();
+            if let Ok(slot) = usize::try_from(i - app.get_list_first()) {
+                if let Some(mut row) = model.row_data(slot) {
+                    row.liked = !row.liked;
+                    model.set_row_data(slot, row);
+                }
             }
         })
     });
-    app.on_request_cover(|i| with_ctx(|c| c.request_cover(i as usize)));
+    app.on_list_viewport(|first, count| with_ctx(|c| {
+        let range = (first.max(0) as usize, count.max(0) as usize);
+        if c.list_window.replace(range) != range && c.ui().global::<App>().get_page() == Page::List {
+            c.show_list_window(true);
+        }
+    }));
+    app.on_grid_viewport(|first, count| with_ctx(|c| {
+        let range = (first.max(0) as usize, count.max(0) as usize);
+        if c.grid_window.replace(range) != range && c.ui().global::<App>().get_page() == Page::Grid {
+            c.show_grid_window(true);
+        }
+    }));
     app.on_filter_changed(|_| with_ctx(|c| c.apply_filter()));
 
     register_extra(&app);
@@ -2092,15 +2205,16 @@ fn install_mpris(ui: &AppWindow, player: &Player) {
         let _ = weak.upgrade_in_event_loop(move |ui| {
             use crate::mpris::Event;
             let app = ui.global::<App>();
-            let s = p.state();
             match e {
                 Event::PlayPause => app.invoke_play_pause(),
-                Event::Play if !s.playing => app.invoke_play_pause(),
-                Event::Pause if s.playing => app.invoke_play_pause(),
-                Event::Play | Event::Pause => {}
+                Event::Play => with_ctx(|c| {
+                    if c.st.borrow().started { p.send(Cmd::Resume); } else { c.start(); }
+                }),
+                Event::Pause => p.send(Cmd::Pause),
                 Event::Next => p.send(Cmd::Next),
                 Event::Prev => p.send(Cmd::Prev),
-                Event::SeekBy(sec) => p.send(Cmd::Seek((s.position + sec).max(0.0))),
+                Event::SeekTrack(id, micros) => p.send(Cmd::SeekTrack(id, micros)),
+                Event::SeekBy(sec) => p.send(Cmd::SeekBy(sec)),
                 Event::Volume(v) => app.invoke_set_volume(v),
                 Event::Raise => reveal(&ui),
                 Event::Quit => quit(),
@@ -2477,18 +2591,7 @@ impl Ctx {
     // ---------- карточки ----------
 
     fn card_model(self: &Rc<Self>, block: &str, cards: &[Card], css: f32) -> ModelRc<CardItem> {
-        let items: Vec<CardItem> = cards
-            .iter()
-            .map(|c| CardItem {
-                title: c.title.clone().into(),
-                subtitle: c.subtitle.clone().into(),
-                round: c.round,
-                year: c.year.clone().into(),
-                likes: c.likes.map(group_digits).unwrap_or_default().into(),
-                explicit: c.explicit,
-                ..Default::default()
-            })
-            .collect();
+        let items: Vec<_> = cards.iter().map(card_item).collect();
         let model = Rc::new(VecModel::from(items));
         for (i, c) in cards.iter().enumerate() {
             self.load_cover(&model, i, c.covers.first().map(|s| s.as_str()), css, |r, img| r.cover = img);
@@ -2538,7 +2641,11 @@ impl Ctx {
             }
             _ => {}
         }
-        let card = self.st.borrow().cards.get(block).and_then(|c| c.get(i).cloned());
+        let card = {
+            let st = self.st.borrow();
+            let cards = if block == "grid" { st.grid.get(st.grid_tab).map(|t| &t.1) } else { st.cards.get(block) };
+            cards.and_then(|items| items.get(i).cloned())
+        };
         if let Some(c) = card {
             self.open_target(&c.target, &c.title);
         }
@@ -3147,23 +3254,8 @@ impl Ctx {
     fn merge_entity_snapshot(&self, kind: &'static str, ids: Vec<String>) {
         let mut st = self.st.borrow_mut();
         let mut fresh: std::collections::HashSet<String> = ids.into_iter().collect();
-        let old = match kind {
-            "albums" => &st.liked_albums,
-            "playlists" => &st.liked_playlists,
-            _ => &st.liked_artists,
-        };
-        for (k, key) in &st.saved_entities {
-            if *k == kind {
-                if old.contains(key) { fresh.insert(key.clone()); } else { fresh.remove(key); }
-            }
-        }
-        for ((k, id), pending) in &mut st.entity_likes {
-            if *k == kind {
-                let key = if kind == "playlists" { format!("playlist:{id}") } else { id.clone() };
-                pending.confirmed = fresh.contains(&key);
-                if pending.desired { fresh.insert(key); } else { fresh.remove(&key); }
-            }
-        }
+        let State { saved_entities, entity_likes, .. } = &mut *st;
+        merge_entity_likes(kind, &mut fresh, saved_entities, entity_likes);
         let selected = match kind {
             "albums" => st.list_key.as_deref().and_then(|k| k.strip_prefix("album:")),
             "playlists" => st.list_key.as_deref().filter(|k| k.starts_with("playlist:")),
@@ -3211,7 +3303,7 @@ impl Ctx {
                 let mut st = c.st.borrow_mut();
                 if !st.net.as_ref().is_some_and(|active| Arc::ptr_eq(&active.toast, &net.toast)) { return; }
                 let request = (kind, id.clone());
-                if result.is_ok() { st.saved_entities.insert((kind, key.clone())); }
+                if result.is_ok() { st.saved_entities.insert((kind, key.clone()), sent); }
                 let Some(pending) = st.entity_likes.get_mut(&request) else { return };
                 let next = pending.complete(sent, result.is_ok());
                 let desired = pending.desired;
@@ -3367,7 +3459,8 @@ impl Ctx {
                 let dir = music_dir(&self.st.borrow().cfg);
                 self.toast(format!("Скачиваем «{}»", t.title));
                 std::thread::spawn(move || {
-                    let res = save_track(&api, &dir, &t);
+                    let names = legacy_names(std::slice::from_ref(&t));
+                    let res = save_track(&api, &dir, &t, &names);
                     net.say(match res {
                         Ok(p) => format!("Сохранено: {}", p.display()),
                         Err(e) => format!("Не удалось скачать: {e}"),
@@ -3736,8 +3829,10 @@ impl Ctx {
             Page::List => {
                 st.list_shown = None;
                 st.view.clear();
+                st.search_index.clear();
                 drop(st);
-                self.tracks.set_vec(Vec::new());
+                app.set_list_count(0);
+                app.set_tracks(ModelRc::default());
                 app.set_list_cover(Image::default());
                 app.set_list_artist_cover(Image::default());
             }
@@ -3749,6 +3844,13 @@ impl Ctx {
                 for f in [App::set_ar_release, App::set_ar_studio, App::set_ar_albums, App::set_ar_playlists, App::set_ar_compilations, App::set_ar_similar] {
                     f(&app, ModelRc::default());
                 }
+            }
+            Page::Grid => {
+                st.grid.clear();
+                drop(st);
+                self.images.cancel_pending();
+                app.set_grid_count(0);
+                app.set_grid_cards(ModelRc::default());
             }
             Page::Search => {
                 st.search_shown = None;
@@ -3937,12 +4039,9 @@ impl Ctx {
         std::thread::spawn(move || {
             let total = tracks.len();
             let (mut ok, mut failed) = (0, 0);
+            let names = legacy_names(&tracks);
             for (i, t) in tracks.iter().enumerate() {
-                if saved_already(&dir, t) {
-                    ok += 1;
-                    continue;
-                }
-                match save_track(&api, &dir, t) {
+                match save_track(&api, &dir, t, &names) {
                     Ok(_) => ok += 1,
                     Err(e) => {
                         failed += 1;
@@ -3981,6 +4080,37 @@ fn audio_ext(b: &[u8]) -> &'static str {
     }
 }
 
+fn legacy_stem(t: &Track) -> String {
+    file_name_max(&format!("{} — {}", t.artists, t.title), 120)
+}
+
+struct DownloadNames<'a> {
+    legacy: HashMap<String, Option<&'a str>>,
+    numbered: std::cell::OnceCell<std::io::Result<HashMap<String, std::collections::BTreeSet<u64>>>>,
+}
+
+fn numbered_downloads(dir: &std::path::Path) -> std::io::Result<HashMap<String, std::collections::BTreeSet<u64>>> {
+    let mut found = HashMap::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let Some((id, n)) = stem.strip_prefix("yamusic-").and_then(|s| s.rsplit_once('-')) else { continue };
+        if let Ok(n) = n.parse::<u64>() { found.entry(id.to_owned()).or_insert_with(std::collections::BTreeSet::new).insert(n); }
+    }
+    Ok(found)
+}
+
+fn legacy_names(tracks: &[Track]) -> DownloadNames<'_> {
+    let mut names = HashMap::new();
+    for track in tracks {
+        let id = Some(track.id.as_str());
+        names.entry(legacy_stem(track).to_lowercase()).and_modify(|known| {
+            if *known != id { *known = None; }
+        }).or_insert(id);
+    }
+    DownloadNames { legacy: names, numbered: Default::default() }
+}
+
 fn track_file_stem(t: &Track) -> String {
     use sha2::{Digest, Sha256};
     let id = if !t.id.is_empty() && t.id.len() <= 24 && t.id.bytes().all(|b| b.is_ascii_digit()) {
@@ -3988,7 +4118,7 @@ fn track_file_stem(t: &Track) -> String {
     } else {
         format!("{:x}", Sha256::digest(t.id.as_bytes()))[..24].to_owned()
     };
-    let name = file_name_max(&format!("{} — {}", t.artists, t.title), 120);
+    let name = legacy_stem(t);
     // Оставляем место для ID и расширения в пределах 255 байт файловой системы.
     let mut end = name.len().min(255 - ".tagged.part".len() - " []".len() - id.len());
     while !name.is_char_boundary(end) {
@@ -3998,19 +4128,97 @@ fn track_file_stem(t: &Track) -> String {
 }
 
 /// Трек уже скачан: готовый файл (не `.part`) с ненулевым размером.
-fn saved_already(dir: &std::path::Path, t: &Track) -> bool {
-    let stem = track_file_stem(t);
-    ["mp3", "m4a", "aac", "flac"]
-        .iter()
-        .any(|e| std::fs::metadata(dir.join(format!("{stem}.{e}"))).is_ok_and(|m| m.len() > 0))
+fn download_location(dir: &std::path::Path, t: &Track, names: &DownloadNames<'_>,
+    mut verify: impl FnMut(&mut std::fs::File) -> std::io::Result<bool>) -> std::io::Result<(String, Option<std::path::PathBuf>)> {
+    use std::io::ErrorKind;
+    let formats = ["mp3", "m4a", "aac", "flac"];
+    let legacy = legacy_stem(t);
+    let legacy_key = legacy.to_lowercase();
+    if names.legacy.get(&legacy_key) == Some(&Some(t.id.as_str())) {
+        for ext in formats {
+            let path = dir.join(format!("{legacy}.{ext}"));
+            if let Ok(mut file) = open_download(&path) {
+                if file.metadata()?.len() > 0 && verify(&mut file)? { return Ok((legacy, Some(path))); }
+            }
+        }
+    }
+    let base = track_file_stem(t);
+    let id = base.rsplit_once(" [").expect("имя содержит ID").1.trim_end_matches(']');
+    let mut free = None;
+    let index = names.numbered.get_or_init(|| numbered_downloads(dir)).as_ref()
+        .map_err(|e| std::io::Error::new(e.kind(), e.to_string()))?;
+    let existing = index.get(id);
+    let next = (1u64..).find(|n| existing.is_none_or(|set| !set.contains(n))).unwrap();
+    let candidates = std::iter::once(0).chain(existing.into_iter().flatten().copied());
+    for n in candidates.chain(std::iter::once(next)) {
+        let stem = if n == 0 { base.clone() } else { format!("yamusic-{id}-{n}") };
+        let reserved = names.legacy.contains_key(&stem.to_lowercase());
+        let mut occupied = false;
+        for ext in formats {
+            let path = dir.join(format!("{stem}.{ext}"));
+            match open_download(&path) {
+                Ok(mut file) => {
+                    if file.metadata()?.len() > 0 && verify(&mut file)? { return Ok((stem, Some(path))); }
+                    occupied = true;
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) if e.kind() == ErrorKind::InvalidInput => occupied = true,
+                Err(e) => return Err(e),
+            }
+        }
+        if !occupied && !reserved {
+            free.get_or_insert(stem);
+        }
+    }
+    free.map(|stem| (stem, None)).ok_or_else(|| ErrorKind::AlreadyExists.into())
 }
 
-/// Скачать трек: сначала в `.part`, теги — в mp3, и только после этого переименовать в
-/// готовое имя. Обрыв оставит лишь `.part`, который следующая попытка перезапишет.
-fn save_track(api: &Api, dir: &std::path::Path, t: &Track) -> Result<std::path::PathBuf, String> {
+fn confirmed_legacy(file: &mut std::fs::File, id: &str, cache: &std::path::Path, verify: impl FnOnce(&mut std::fs::File) -> std::io::Result<bool>) -> std::io::Result<bool> {
+    use sha2::{Digest, Sha256};
+    if crate::api::saved_payload(file).is_err() { return Ok(false); }
+    let mut hash = Sha256::new();
+    std::io::copy(file, &mut hash)?;
+    let receipt = cache.join(format!("{:x}-{:x}", Sha256::digest(id.as_bytes()), hash.finalize()));
+    if std::fs::symlink_metadata(&receipt).is_ok_and(|m| m.is_file()) { return Ok(true); }
+    if !verify(file)? { return Ok(false); }
+    if std::fs::create_dir_all(cache).is_ok() {
+        let _ = std::fs::File::create_new(receipt);
+    }
+    Ok(true)
+}
+
+fn open_download(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::io::{Error, ErrorKind};
+    let invalid = || Error::new(ErrorKind::InvalidInput, "Ожидался обычный файл");
+    if !std::fs::symlink_metadata(path)?.is_file() { return Err(invalid()); }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(target_os = "linux")] {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
+    }
+    #[cfg(windows)] {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = opts.open(path)?;
+    if !file.metadata()?.is_file() { return Err(invalid()); }
+    Ok(file)
+}
+
+/// Каждая загрузка готовит собственный файл и публикует его после записи тегов.
+fn save_track(api: &Api, dir: &std::path::Path, t: &Track, names: &DownloadNames<'_>) -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let stem = track_file_stem(t);
-    let part = dir.join(format!("{stem}.part"));
+    let receipts = crate::config::dir().join("legacy-downloads");
+    let (stem, existing) = download_location(dir, t, names, |file| {
+        confirmed_legacy(file, &t.id, &receipts, |file| {
+            let url = api.stream_url(&t.id).map_err(std::io::Error::other)?;
+            api.matches_saved_audio(&url, file)
+        })
+    }).map_err(|e| e.to_string())?;
+    if let Some(path) = existing { return Ok(path); }
+    let scratch = tempfile::tempdir_in(dir).map_err(|e| e.to_string())?;
+    let part = scratch.path().join("audio.part");
     let mut last = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
@@ -4025,55 +4233,58 @@ fn save_track(api: &Api, dir: &std::path::Path, t: &Track) -> Result<std::path::
             Err(e) => last = e,
         }
     }
-    if !last.is_empty() {
-        let _ = std::fs::remove_file(&part);
-        return Err(last);
+    if !last.is_empty() { return Err(last); }
+    let mut head = [0u8; 16];
+    {
+        use std::io::Read as _;
+        let mut f = std::fs::File::open(&part).map_err(|e| e.to_string())?;
+        let n = f.read(&mut head).map_err(|e| e.to_string())?;
+        if n < head.len() {
+            return Err("файл слишком короткий".into());
+        }
     }
-    let finish = || -> Result<std::path::PathBuf, String> {
-        let mut head = [0u8; 16];
+    let ext = audio_ext(&head);
+    let path = dir.join(format!("{stem}.{ext}"));
+    let completed = if ext == "mp3" {
+        let cover = t.cover_url(400).and_then(|u| api.fetch_bytes(&u).ok());
+        let tag = crate::tags::id3(&crate::tags::Tags {
+            title: &if t.version.is_empty() { t.title.clone() } else { format!("{} ({})", t.title, t.version) },
+            artist: &t.artists,
+            album: &t.album_title,
+            year: t.year,
+            track: t.position,
+            cover: cover.as_deref(),
+        });
+        let tagged = scratch.path().join("tagged.part");
         {
-            use std::io::Read as _;
-            let mut f = std::fs::File::open(&part).map_err(|e| e.to_string())?;
-            let n = f.read(&mut head).map_err(|e| e.to_string())?;
-            if n < head.len() {
-                return Err("файл слишком короткий".into());
-            }
+            use std::io::{Read as _, Seek as _, Write as _};
+            let mut src = std::fs::File::open(&part).map_err(|e| e.to_string())?;
+            let mut probe = vec![0u8; 10];
+            let _ = src.read(&mut probe);
+            let skip = crate::tags::existing_id3_len(&probe) as u64;
+            src.seek(std::io::SeekFrom::Start(skip)).map_err(|e| e.to_string())?;
+            let mut out = std::fs::File::create(&tagged).map_err(|e| e.to_string())?;
+            out.write_all(&tag).map_err(|e| e.to_string())?;
+            std::io::copy(&mut src, &mut out).map_err(|e| e.to_string())?;
+            out.sync_all().map_err(|e| e.to_string())?;
         }
-        let ext = audio_ext(&head);
-        let path = dir.join(format!("{stem}.{ext}"));
-        if ext == "mp3" {
-            let cover = t.cover_url(400).and_then(|u| api.fetch_bytes(&u).ok());
-            let tag = crate::tags::id3(&crate::tags::Tags {
-                title: &if t.version.is_empty() { t.title.clone() } else { format!("{} ({})", t.title, t.version) },
-                artist: &t.artists,
-                album: &t.album_title,
-                year: t.year,
-                track: t.position,
-                cover: cover.as_deref(),
-            });
-            let tagged = dir.join(format!("{stem}.tagged.part"));
-            {
-                use std::io::{Read as _, Seek as _, Write as _};
-                let mut src = std::fs::File::open(&part).map_err(|e| e.to_string())?;
-                let mut probe = vec![0u8; 10];
-                let _ = src.read(&mut probe);
-                let skip = crate::tags::existing_id3_len(&probe) as u64;
-                src.seek(std::io::SeekFrom::Start(skip)).map_err(|e| e.to_string())?;
-                let mut out = std::fs::File::create(&tagged).map_err(|e| e.to_string())?;
-                out.write_all(&tag).map_err(|e| e.to_string())?;
-                std::io::copy(&mut src, &mut out).map_err(|e| e.to_string())?;
-                out.sync_all().map_err(|e| e.to_string())?;
-            }
-            let _ = std::fs::remove_file(&part);
-            std::fs::rename(&tagged, &path).map_err(|e| e.to_string())?;
-        } else {
-            std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
-        }
-        Ok(path)
+        tagged
+    } else {
+        part.clone()
     };
-    finish().inspect_err(|_| {
-        let _ = std::fs::remove_file(&part);
-    })
+    let mut file = open_download(&completed).map_err(|e| e.to_string())?;
+    let temp = tempfile::TempPath::try_from_path(completed).map_err(|e| e.to_string())?;
+    match temp.persist_noclobber(&path) {
+        Ok(()) => {}
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let mut winner = open_download(&path).map_err(|e| e.to_string())?;
+            let same = crate::api::same_saved_files(&mut file, &mut winner).map_err(|e| e.to_string())?;
+            if !same { return Err("Выбранное имя уже занято другим файлом".into()); }
+        }
+        Err(e) => return Err(e.error.to_string()),
+    }
+    let _ = confirmed_legacy(&mut file, &t.id, &receipts, |_| Ok(true));
+    Ok(path)
 }
 
 /// Колбэки новых экранов: поиск, исполнитель, полноэкранный плеер, меню, настройки звука.
@@ -4115,7 +4326,9 @@ fn register_extra(app: &App) {
     });
     app.on_select_grid_tab(|i| {
         with_ctx(|c| {
-            c.st.borrow_mut().grid_tab = i.max(0) as usize;
+            let tab = i.max(0) as usize;
+            if tab >= c.st.borrow().grid.len() { return; }
+            c.st.borrow_mut().grid_tab = tab;
             c.show_grid_tab();
         })
     });
@@ -4422,4 +4635,79 @@ fn downloads_with_same_title_keep_both_recordings() {
     assert_ne!(track_file_stem(&first), track_file_stem(&second));
     second.title = "я".repeat(140);
     assert!(format!("{}.tagged.part", track_file_stem(&second)).len() <= 255);
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_download_rejects_names_shared_by_different_ids() {
+    let mut t = crate::api::parse_track(&serde_json::json!({"id":12,"title":"Песня","artists":[{"id":1,"name":"Группа"}]})).unwrap();
+    let mut tracks = vec![t.clone(), t.clone()];
+    assert_eq!(legacy_names(&tracks).legacy["группа — песня"], Some("12"));
+    t.id = "13".into();
+    tracks.push(t);
+    assert_eq!(legacy_names(&tracks).legacy["группа — песня"], None);
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_receipt_is_scoped_to_track_and_complete_payload() {
+    use std::io::{Seek, Write};
+    let cache = tempfile::tempdir().unwrap();
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(b"fLaC-long-enough-for-a-header").unwrap();
+    assert!(confirmed_legacy(&mut file, "12", cache.path(), |_| Ok(true)).unwrap());
+    assert!(confirmed_legacy(&mut file, "12", cache.path(), |_| panic!("unnecessary network request")).unwrap());
+    assert!(!confirmed_legacy(&mut file, "13", cache.path(), |_| Ok(false)).unwrap());
+    file.seek(std::io::SeekFrom::End(-1)).unwrap();
+    file.write_all(b"x").unwrap();
+    assert!(!confirmed_legacy(&mut file, "12", cache.path(), |_| Ok(false)).unwrap());
+}
+
+#[cfg(test)]
+#[test]
+fn colliding_legacy_name_does_not_occupy_another_tracks_id() {
+    use std::io::{Read, Seek};
+    let first = crate::api::parse_track(&serde_json::json!({"id":12,"title":"Песня","artists":[{"id":1,"name":"Группа"}]})).unwrap();
+    let mut second = first.clone();
+    second.id = "13".into();
+    second.title += " [12]";
+    let tracks = [first, second];
+    let names = legacy_names(&tracks);
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("Группа — Песня [12].mp3");
+    std::fs::write(&path, b"ID3 second track 13").unwrap();
+    let (stem, existing) = download_location(folder.path(), &tracks[0], &names, |_| Ok(false)).unwrap();
+    assert!(existing.is_none());
+    assert_ne!(stem, track_file_stem(&tracks[0]));
+    let (_, existing) = download_location(folder.path(), &tracks[1], &names, |file| {
+        file.rewind().unwrap();
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).unwrap();
+        Ok(data == b"ID3 second track 13")
+    }).unwrap();
+    assert_eq!(existing, Some(path));
+}
+
+#[cfg(test)]
+#[test]
+fn reuse_numbered_download_after_earlier_collision_disappears() {
+    let t = crate::api::parse_track(&serde_json::json!({"id": 12, "title": "Song"})).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let names = legacy_names(std::slice::from_ref(&t));
+    let expected = folder.path().join("yamusic-12-2.mp3");
+    std::fs::write(&expected, b"confirmed existing audio").unwrap();
+    let (_, existing) = download_location(folder.path(), &t, &names, |_| Ok(true)).unwrap();
+    assert_eq!(existing, Some(expected));
+}
+
+
+#[cfg(test)]
+#[test]
+fn failed_legacy_verification_aborts_name_selection() {
+    let t = crate::api::parse_track(&serde_json::json!({"id":12, "title":"Song"})).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let names = legacy_names(std::slice::from_ref(&t));
+    std::fs::write(folder.path().join(format!("{}.mp3", legacy_stem(&t))), b"previous download").unwrap();
+    let error = download_location(folder.path(), &t, &names, |_| Err(std::io::ErrorKind::TimedOut.into())).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
 }

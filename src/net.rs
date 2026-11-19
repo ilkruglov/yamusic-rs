@@ -33,6 +33,7 @@ pub enum Data {
 struct Slot {
     data: Option<Result<Arc<Data>, String>>,
     loading: bool,
+    refresh_again: bool,
     at: Instant,
 }
 
@@ -177,7 +178,7 @@ impl Net {
             s.at = Instant::now();
             return s.data.clone();
         }
-        st.insert(key.to_string(), Slot { data: None, loading: true, at: Instant::now() });
+        st.insert(key.to_string(), Slot { data: None, loading: true, refresh_again: false, at: Instant::now() });
         if st.len() > 80 {
             let oldest = st.iter().filter(|(_, s)| !s.loading).min_by_key(|(_, s)| s.at).map(|(k, _)| k.clone());
             if let Some(k) = oldest {
@@ -197,7 +198,7 @@ impl Net {
     pub fn refresh(&self, key: &str) {
         let mut st = self.store.lock().unwrap();
         match st.get_mut(key) {
-            Some(s) if s.loading => return,
+            Some(s) if s.loading => { s.refresh_again = true; return; }
             Some(s) => s.loading = true,
             None => return,
         }
@@ -207,20 +208,22 @@ impl Net {
 
     fn load(&self, key: &str) {
         let (api, uid, store, notify, key) = (self.api.clone(), self.uid.clone(), self.store.clone(), self.notify.clone(), key.to_string());
-        std::thread::spawn(move || {
+        std::thread::spawn(move || loop {
             let res = fetch(&api, &uid, &key).map(Arc::new);
             if let Err(e) = &res {
                 log(format!("{key}: {e}"));
             }
             let mut st = store.lock().unwrap();
-            let slot = st.entry(key).or_insert(Slot { data: None, loading: true, at: Instant::now() });
-            slot.loading = false;
+            let slot = st.entry(key.clone()).or_insert(Slot { data: None, loading: true, refresh_again: false, at: Instant::now() });
             match (&slot.data, res) {
                 (Some(Ok(_)), Err(_)) => {}
                 (_, res) => slot.data = Some(res),
             }
+            if std::mem::take(&mut slot.refresh_again) { continue; }
+            slot.loading = false;
             drop(st);
             notify();
+            break;
         });
     }
 

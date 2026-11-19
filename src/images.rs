@@ -135,6 +135,11 @@ impl Images {
             let (lock, cv) = &*self.queue;
             lock.lock().unwrap().push((url.to_string(), px, cancellable));
             cv.notify_one();
+        } else if !cancellable {
+            // Один URL может понадобиться и странице, и постоянной обложке плеера.
+            if let Some(job) = self.queue.0.lock().unwrap().iter_mut().find(|job| job.0 == url) {
+                job.2 = false;
+            }
         }
     }
 

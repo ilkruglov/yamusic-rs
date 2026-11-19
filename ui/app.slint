@@ -109,7 +109,12 @@ export component AppWindow inherits Window {
         height: parent.height - self.y - pad-r;
     }
 
+    property <bool> fullscreen-open: App.fullscreen;
+    property <float> fullscreen-progress: 0;
+    changed fullscreen-open => { root.fullscreen-progress = root.fullscreen-open ? 1 : 0; }
+    animate fullscreen-progress { duration: App.motion && App.fullscreen ? 220ms : 0ms; easing: ease-out; }
     content := Rectangle {
+        visible: !App.fullscreen || root.fullscreen-progress < 1;
         x: pad + navbar-w + gap;
         y: new-vibe ? 20px : top;
         width: parent.width - self.x - pad-r;
@@ -190,12 +195,12 @@ export component AppWindow inherits Window {
         height: 80px;
     }
 
-    if App.fullscreen: Fade {
+    if App.fullscreen: Rectangle {
         x: 0;
-        y: 0;
+        y: (1 - root.fullscreen-progress) * 48px;
+        opacity: root.fullscreen-progress;
         width: parent.width;
         height: parent.height;
-        rise: 48px;
         FullscreenPlayer { }
     }
 

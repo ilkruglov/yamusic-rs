@@ -102,11 +102,12 @@ pub enum Cmd {
     PlayPause,
     /// Снять с паузы (если уже играет — ничего не делать).
     Resume,
-    #[cfg(any(windows, test))]
     Pause,
     Next,
     Prev,
     Seek(f32),
+    #[cfg(target_os = "linux")]
+    SeekBy(f32),
     #[cfg(target_os = "linux")]
     SeekTrack(mpris_server::TrackId, i64),
     Volume(f32),
@@ -135,13 +136,82 @@ enum Msg {
     Error(String),
 }
 
+#[derive(Clone)]
+struct AudioSender {
+    channel: Sender<Msg>,
+    #[cfg(all(windows, feature = "asio"))]
+    wake: Option<Arc<std::os::windows::io::OwnedHandle>>,
+}
+
+impl From<Sender<Msg>> for AudioSender {
+    fn from(channel: Sender<Msg>) -> Self {
+        #[cfg(all(windows, feature = "asio"))]
+        let wake = {
+            use std::os::windows::io::{FromRawHandle, OwnedHandle};
+            use windows_sys::Win32::System::Threading::CreateEventW;
+            // Auto-reset: одно пробуждение достаточно для всех накопившихся команд.
+            let handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+            (!handle.is_null()).then(|| Arc::new(unsafe { OwnedHandle::from_raw_handle(handle) }))
+        };
+        Self { channel, #[cfg(all(windows, feature = "asio"))] wake }
+    }
+}
+
+impl AudioSender {
+    fn send(&self, msg: Msg) -> Result<(), ()> {
+        self.channel.send(msg).map_err(|_| ())?;
+        #[cfg(all(windows, feature = "asio"))]
+        if let Some(event) = &self.wake {
+            use std::os::windows::io::AsRawHandle;
+            unsafe { windows_sys::Win32::System::Threading::SetEvent(event.as_raw_handle()); }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(all(windows, feature = "asio")))]
+    fn recv(&self, rx: &Receiver<Msg>, timeout: Duration) -> Result<Msg, RecvTimeoutError> {
+        rx.recv_timeout(timeout)
+    }
+
+    #[cfg(all(windows, feature = "asio"))]
+    fn recv(&self, rx: &Receiver<Msg>, timeout: Duration) -> Result<Msg, RecvTimeoutError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{Foundation::WAIT_FAILED, UI::WindowsAndMessaging::*};
+        let deadline = Instant::now() + timeout;
+        loop {
+            // Обслуживаем HWND драйвера и окна COM на создавшем их потоке.
+            // Ограничиваем пачку, чтобы поток также успевал принять команды плеера.
+            unsafe {
+                let mut msg = std::mem::zeroed();
+                for _ in 0..32 {
+                    if PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) == 0 { break; }
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            match rx.try_recv() {
+                Ok(msg) => return Ok(msg),
+                Err(mpsc::TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return Err(RecvTimeoutError::Timeout); }
+            let Some(event) = &self.wake else { return rx.recv_timeout(remaining); };
+            let handle = event.as_raw_handle();
+            if unsafe { MsgWaitForMultipleObjectsEx(1, &handle, remaining.as_millis().max(1) as u32, QS_ALLINPUT, MWMO_INPUTAVAILABLE) } == WAIT_FAILED {
+                return rx.recv_timeout(remaining);
+            }
+        }
+    }
+}
+
 type Notify = Arc<dyn Fn() + Send + Sync>;
 type Job = Box<dyn FnOnce() + Send>;
 pub type Likes = Arc<Mutex<HashSet<String>>>;
 
 #[derive(Clone)]
 pub struct Player {
-    tx: Sender<Msg>,
+    tx: AudioSender,
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
     pub eq: Arc<EqParams>,
@@ -151,6 +221,7 @@ pub struct Player {
 impl Player {
     pub fn spawn(notify: Notify, asio_driver: Option<String>) -> Player {
         let (tx, rx) = mpsc::channel();
+        let tx = AudioSender::from(tx);
         let shared = Arc::new(Mutex::new(Shared { volume: 0.6, ..Default::default() }));
         let likes: Likes = Default::default();
         let eq: Arc<EqParams> = Default::default();
@@ -293,8 +364,7 @@ fn open_output(asio_driver: Option<&str>) -> Result<Output, String> {
     let _ = asio_driver;
     #[cfg(windows)]
     {
-        let device = system_device().ok_or("Системный аудиовыход недоступен")?;
-        open_system_device(device.clone(), Some(device))
+        open_system_output(None)
     }
     #[cfg(not(windows))]
     {
@@ -302,6 +372,45 @@ fn open_output(asio_driver: Option<&str>) -> Result<Output, String> {
             .map_err(|e| format!("Не удалось открыть системный аудиовыход: {e}"))?;
         Ok(Output::System { _stream: stream, handle })
     }
+}
+
+#[cfg(windows)]
+fn open_system_output(previous: Option<rodio::cpal::platform::WasapiDevice>) -> Result<Output, String> {
+    use rodio::cpal::{platform::DeviceInner, traits::HostTrait};
+    let default = system_device();
+    first_system_output(previous, default.clone(), || {
+        rodio::cpal::default_host().output_devices().into_iter().flatten().filter_map(|device| {
+            #[allow(unreachable_patterns)]
+            match device.into_inner() { DeviceInner::Wasapi(d) => Some(d), _ => None }
+        })
+    }, |device| open_system_device(device, default.clone()))
+}
+
+#[cfg(any(windows, test))]
+fn first_system_output<D: Clone + PartialEq, O, I: IntoIterator<Item = D>>(previous: Option<D>, default: Option<D>,
+    others: impl FnOnce() -> I, open: impl FnMut(D) -> Result<O, String>) -> Result<O, String> {
+    let mut open = open;
+    let mut tried = Vec::new();
+    let mut error = String::from("Системный аудиовыход недоступен");
+    let mut try_device = |device: D| {
+        if tried.contains(&device) { return None; }
+        tried.push(device.clone());
+        open(device).map_err(|e| error = e).ok()
+    };
+    if let Some(output) = previous.into_iter().chain(default).find_map(&mut try_device) { return Ok(output); }
+    others().into_iter().find_map(try_device).ok_or(error)
+}
+
+#[cfg(test)]
+#[test]
+fn system_falls_back_to_third_device_in_order() {
+    let mut tried = Vec::new();
+    let out = first_system_output(Some("old"), Some("busy"), || ["busy", "old", "free"], |d| {
+        tried.push(d);
+        if d == "free" { Ok(d) } else { Err(d.to_string()) }
+    });
+    assert_eq!(out.as_deref(), Ok("free"));
+    assert_eq!(tried, ["old", "busy", "free"]);
 }
 
 #[cfg(windows)]
@@ -391,6 +500,7 @@ enum End {
 }
 
 struct ListPlay {
+    deferred: VecDeque<Track>,
     all: Vec<Track>,
     after: After,
 }
@@ -402,7 +512,7 @@ struct PendingLike {
 }
 
 struct Engine {
-    tx: Sender<Msg>,
+    tx: AudioSender,
     bg: Sender<Job>,
     like_seq: u64,
     local_likes: HashSet<String>,
@@ -458,7 +568,7 @@ struct Engine {
 }
 
 impl Engine {
-    fn new(tx: Sender<Msg>, shared: Arc<Mutex<Shared>>, likes: Likes, notify: Notify, eq: Arc<EqParams>, asio_driver: Option<String>) -> Self {
+    fn new(tx: impl Into<AudioSender>, shared: Arc<Mutex<Shared>>, likes: Likes, notify: Notify, eq: Arc<EqParams>, asio_driver: Option<String>) -> Self {
         // Фидбек и лайки — по порядку в отдельном потоке, чтобы не блокировать плеер.
         let (bg, bg_rx) = mpsc::channel::<Job>();
         thread::Builder::new()
@@ -470,7 +580,7 @@ impl Engine {
             })
             .expect("bg thread");
         Engine {
-            tx,
+            tx: tx.into(),
             bg,
             like_seq: 0,
             local_likes: HashSet::new(),
@@ -521,7 +631,7 @@ impl Engine {
 
     fn run(mut self, rx: Receiver<Msg>) {
         loop {
-            match rx.recv_timeout(Duration::from_millis(200)) {
+            match self.tx.recv(&rx, Duration::from_millis(200)) {
                 Ok(msg) => {
                     self.handle(msg);
                     self.sync();
@@ -548,18 +658,9 @@ impl Engine {
         if self.audio.is_none() {
             let output = open_output(self.asio_driver.as_deref());
             #[cfg(windows)]
-            let output = output.or_else(|error| {
-                use rodio::cpal::{platform::DeviceInner, traits::HostTrait};
-                if self.asio_driver.is_some() { return Err(error); }
-                let default = system_device();
-                rodio::cpal::default_host().output_devices().ok().and_then(|mut devices| devices.find_map(|other| {
-                    match other.into_inner() {
-                        DeviceInner::Wasapi(device) if Some(&device) != default.as_ref() =>
-                            open_system_device(device, default.clone()).ok(),
-                        _ => None,
-                    }
-                })).ok_or(error)
-            });
+            let output = if self.loaded && self.asio_driver.is_some() {
+                output.or_else(|_| open_system_output(None))
+            } else { output };
             self.audio = Some(output?);
         }
         Ok(())
@@ -569,10 +670,18 @@ impl Engine {
         (self.position_base + self.sink().map(Sink::get_pos).unwrap_or_default()).as_secs_f32()
     }
 
-    fn attach(&mut self, bytes: Arc<[u8]>, pos: Duration) -> Result<(), String> {
-        let mut decoder = Decoder::new(Cursor::new(bytes)).map_err(|e| format!("Не удалось декодировать трек: {e}"))?;
+    fn attach(&mut self, bytes: Arc<[u8]>, mut pos: Duration) -> Result<(), String> {
+        let decode = || Decoder::new(Cursor::new(bytes.clone())).map_err(|e| format!("Не удалось декодировать трек: {e}"));
+        let mut decoder = decode()?;
         if !pos.is_zero() {
-            decoder.try_seek(pos).map_err(|e| format!("Не удалось восстановить позицию: {e}"))?;
+            if let Err(e) = decoder.try_seek(pos) {
+                let message = format!("Не удалось восстановить позицию: {e}");
+                if self.loaded { return Err(message); }
+                // Перемотка пришла до загрузки. Сам трек можно воспроизвести с начала.
+                log(message);
+                decoder = decode()?;
+                pos = Duration::ZERO;
+            }
         }
         let track = Eq::new(decoder.convert_samples::<f32>(), self.eq.clone());
         let sink = self.audio.as_ref().ok_or("Аудиовыход недоступен")?.track_sink(track, self.volume * self.volume)?;
@@ -586,7 +695,7 @@ impl Engine {
     }
 
     fn seek(&mut self, pos: Duration) {
-        if self.current_bytes.is_none() { return; }
+        if self.current.is_none() { return; }
         if self.audio.is_none() || !self.loaded {
             self.position_base = pos;
         } else if let Some(bytes) = self.current_bytes.clone() {
@@ -624,7 +733,7 @@ impl Engine {
     #[cfg(windows)]
     fn change_output(&mut self, driver: Option<String>, manual: bool) {
         let previous_system = match &self.audio {
-            Some(Output::System { device, observed_default, .. }) => Some((device.clone(), observed_default.clone())),
+            Some(Output::System { device, .. }) => Some(device.clone()),
             _ => None,
         };
         self.detach_output();
@@ -636,20 +745,21 @@ impl Engine {
             Err(mut message) => {
                 self.audio = None;
                 let old = self.asio_driver.clone();
-                let previous = if let Some((device, observed_default)) = previous_system {
-                    Some(open_system_device(device, observed_default))
-                } else if manual && old != driver {
-                    Some(open_output(old.as_deref()))
-                } else {
-                    None
-                };
-                let restored = previous.is_some_and(|output| match self.open_at_position(output) {
-                    Ok(()) => true,
-                    Err(e) => { message = format!("{message}. Прежний выход недоступен: {e}"); false }
-                });
-                if !restored {
+                let restored_old = manual && old.is_some() && old != driver
+                    && self.open_at_position(open_output(old.as_deref())).is_ok();
+                if !restored_old && (self.loaded || !self.paused || old.is_none()) {
                     self.audio = None;
-                    self.paused = true;
+                    match self.open_at_position(open_system_output(if manual { previous_system } else { None })) {
+                        Ok(()) => {
+                            if manual { self.asio_driver = None; }
+                            message.push_str(". Используется системный выход");
+                        }
+                        Err(e) => {
+                            message = format!("{message}. Системный выход недоступен: {e}");
+                            self.audio = None;
+                            self.paused = true;
+                        }
+                    }
                 }
                 self.output_error(message);
             }
@@ -776,7 +886,7 @@ impl Engine {
     /// Состояние движка → Shared для UI.
     fn sync(&mut self) {
         let playing = self.loaded && !self.paused && self.sink().map(|s| !s.is_paused()).unwrap_or(false);
-        let pos = if self.current_bytes.is_some() { self.pos() } else { 0.0 };
+        let pos = if self.current.is_some() { self.pos() } else { 0.0 };
         let upcoming: Vec<Track> = self.queue.iter().take(30).cloned().collect();
         let mut s = self.shared.lock().unwrap();
         s.playing = playing;
@@ -965,7 +1075,6 @@ impl Engine {
                 s.uid.clear();
             }
             Cmd::Resume => self.resume(),
-            #[cfg(any(windows, test))]
             Cmd::Pause => self.pause(),
             Cmd::PlayPause => {
                 if self.paused || (self.audio.is_none() && self.current_bytes.is_some()) {
@@ -987,6 +1096,8 @@ impl Engine {
                     self.cmd(Cmd::Seek(micros as f32 / 1_000_000.0));
                 }
             }
+            #[cfg(target_os = "linux")]
+            Cmd::SeekBy(offset) => self.cmd(Cmd::Seek(self.pos() + offset)),
             Cmd::Seek(sec) => self.seek(Duration::from_secs_f32(sec.max(0.0))),
             Cmd::Volume(v) => {
                 self.volume = v.clamp(0.0, 1.0);
@@ -1027,7 +1138,7 @@ impl Engine {
                 }
                 self.queue.push_back(first);
                 self.queue.extend(order);
-                self.list = Some(ListPlay { all: tracks, after });
+                self.list = Some(ListPlay { deferred: VecDeque::new(), all: tracks, after });
                 self.set_source(source);
                 self.advance(End::Skip);
             }
@@ -1065,12 +1176,19 @@ impl Engine {
             Cmd::AllowExplicit(allow) => self.set_allow_explicit(allow),
             Cmd::Shuffle(on) => {
                 self.shuffle = on;
-                if self.list.is_some() {
+                if let Some(list) = &mut self.list {
+                    if let Some((first, tail)) = list.deferred.make_contiguous().split_first_mut() {
+                        if on {
+                            shuffle(tail);
+                        } else {
+                            restore_queue_order(tail, first.list_position.map_or(0, |i| i + 1));
+                        }
+                    }
                     let mut v: Vec<Track> = self.queue.drain(..).collect();
                     if on {
                         shuffle(&mut v);
-                    } else if let (Some(l), Some(cur)) = (&self.list, &self.current) {
-                        let i = cur.list_position.map_or(0, |i| (i + 1) % l.all.len());
+                    } else if let Some(cur) = &self.current {
+                        let i = cur.list_position.map_or(0, |i| (i + 1) % list.all.len());
                         restore_queue_order(&mut v, i);
                     }
                     self.queue.extend(v);
@@ -1321,7 +1439,14 @@ impl Engine {
             self.queue.retain(|t| t.batch_id.is_empty());
         }
         if !allow {
-            self.queue.retain(|t| !t.explicit);
+            if self.blocked_list() {
+                if skip_current {
+                    self.queue.push_front(self.current.as_ref().unwrap().clone());
+                }
+                self.defer_explicit();
+            } else {
+                self.queue.retain(|t| !t.explicit);
+            }
         }
         self.prefetch = None;
         if skip_current {
@@ -1350,11 +1475,30 @@ impl Engine {
         }
     }
 
+    fn blocked_list(&self) -> bool {
+        !crate::api::allow_explicit()
+            && self.list.as_ref().is_some_and(|list| !list.all.is_empty() && list.all.iter().all(|t| t.explicit))
+    }
+
+    fn defer_explicit(&mut self) {
+        if let Some(list) = &mut self.list {
+            self.queue.retain(|track| {
+                if track.explicit { list.deferred.push_back(track.clone()); }
+                !track.explicit
+            });
+        }
+    }
+
     fn play_from_queue(&mut self) {
-        if !crate::api::allow_explicit() {
+        let blocked_list = self.blocked_list();
+        if blocked_list {
+            self.defer_explicit();
+        } else if crate::api::allow_explicit() {
+            if let Some(list) = &mut self.list { self.queue.append(&mut list.deferred); }
+        } else {
             self.queue.retain(|t| !t.explicit);
         }
-        if self.queue.is_empty() && self.list.is_some() {
+        if self.queue.is_empty() && self.list.is_some() && !blocked_list {
             match (&self.list, self.repeat) {
                 (Some(l), Repeat::All) => {
                     let all = l.all.clone();
@@ -1374,6 +1518,7 @@ impl Engine {
             None => {
                 self.current = None;
                 self.current_bytes = None;
+                if self.list.is_some() { self.paused = true; }
                 self.gen += 1;
                 let mut s = self.sh();
                 s.track = None;
@@ -1493,6 +1638,8 @@ impl Engine {
             } else {
                 self.play_loaded(bytes);
             }
+        } else if self.current.is_none() && self.list.is_some() {
+            self.play_from_queue();
         } else if self.current.is_none() && self.sh().status == Status::Ready && self.source.station().is_some() {
             self.sh().loading = true;
             self.fetch_batch();
@@ -1789,6 +1936,23 @@ mod tests {
 
     #[cfg(all(windows, feature = "asio"))]
     #[test]
+    fn audio_wait_dispatches_windows_messages() {
+        use windows_sys::Win32::{Foundation::HWND, UI::WindowsAndMessaging::{KillTimer, SetTimer}};
+        thread_local! { static DISPATCHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+        unsafe extern "system" fn on_timer(window: HWND, _: u32, id: usize, _: u32) {
+            unsafe { KillTimer(window, id); }
+            DISPATCHED.set(true);
+        }
+        let (tx, rx) = mpsc::channel();
+        let tx = AudioSender::from(tx);
+        let timer = unsafe { SetTimer(std::ptr::null_mut(), 0, 10, Some(on_timer)) };
+        assert_ne!(timer, 0);
+        assert!(matches!(tx.recv(&rx, Duration::from_millis(200)), Err(RecvTimeoutError::Timeout)));
+        assert!(DISPATCHED.get());
+    }
+
+    #[cfg(all(windows, feature = "asio"))]
+    #[test]
     fn missing_asio_driver_returns_an_error() {
         let name = "yamusic-rs test ASIO driver that cannot be registered under this name";
         let Err(error) = open_output(Some(name)) else {
@@ -1943,6 +2107,14 @@ mod tests {
         eprintln!("ASIO -> WASAPI {:?}, paused {paused} -> {}", start.elapsed(), engine.pos());
         assert!(engine.sh().audio_output_error.is_none());
         assert!(engine.asio_driver.is_none());
+        engine.asio_driver = Some("yamusic unplugged previous driver".into());
+        let (reply, result) = mpsc::channel();
+        engine.cmd(Cmd::Output(Some("yamusic unavailable new driver".into()), Box::new(move |active, error| {
+            reply.send((active, error)).unwrap();
+        })));
+        let (active, error) = result.recv().unwrap();
+        assert!(active.is_none() && error.is_some());
+        assert!(matches!(engine.audio, Some(Output::System { .. })));
         thread::sleep(Duration::from_millis(100));
         assert!((engine.pos() - paused).abs() < 0.05);
         assert!(Arc::ptr_eq(engine.current_bytes.as_ref().unwrap(), &bytes));
@@ -1994,22 +2166,42 @@ fn explicit_filter_survives_repeat_and_previous() {
     let blocked = crate::api::parse_track(&serde_json::json!({"id":1,"title":"E","explicit":true})).unwrap();
     let allowed = crate::api::parse_track(&serde_json::json!({"id":2,"title":"A"})).unwrap();
     let previous = crate::api::ALLOW_EXPLICIT.swap(false, std::sync::atomic::Ordering::Relaxed);
-    engine.list = Some(ListPlay { all: vec![blocked.clone(), allowed.clone()], after: After::Loop });
+    engine.list = Some(ListPlay { deferred: VecDeque::new(), all: vec![blocked.clone(), allowed.clone()], after: After::Loop });
     engine.repeat = Repeat::All;
     engine.play_from_queue();
     let repeated = engine.current.take().map(|t| t.id);
     engine.history = vec![allowed, blocked];
     engine.prev();
+    let previous_track = engine.current.take().unwrap().id;
+    let explicit = engine.list.as_ref().unwrap().all[0].clone();
+    engine.list.as_mut().unwrap().all = vec![explicit.clone()];
+    engine.list.as_mut().unwrap().after = After::Wave(Source::Wave);
+    engine.repeat = Repeat::Off;
+    engine.queue = VecDeque::from([explicit]);
+    engine.play_from_queue();
+    engine.set_allow_explicit(true);
+    engine.cmd(Cmd::PlayPause);
+    let resumed = engine.current.take().map(|t| t.id);
+    let mut first = engine.list.as_ref().unwrap().all[0].clone();
+    first.id = "3".into();
+    let second = engine.list.as_ref().unwrap().all[0].clone();
+    engine.set_allow_explicit(false);
+    engine.cmd(Cmd::PlayList { source: Source::Wave, tracks: vec![first, second], start: 1, after: After::Loop });
+    engine.set_allow_explicit(true);
+    engine.cmd(Cmd::Resume);
+    let selected = engine.current.as_ref().map(|t| t.id.clone());
     crate::api::ALLOW_EXPLICIT.store(previous, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(selected.as_deref(), Some("1"));
+    assert_eq!(resumed.as_deref(), Some("1"));
     assert_eq!(repeated.as_deref(), Some("2"));
-    assert_eq!(engine.current.unwrap().id, "2");
+    assert_eq!(previous_track, "2");
 }
 
 #[cfg(test)]
 #[test]
 fn later_source_command_expires_artist_request() {
     let (tx, rx) = mpsc::channel();
-    let player = Player { tx, shared: Default::default(), likes: Default::default(), eq: Default::default(), source_request: Default::default() };
+    let player = Player { tx: tx.into(), shared: Default::default(), likes: Default::default(), eq: Default::default(), source_request: Default::default() };
     let first = player.begin_source_request();
     let second = player.begin_source_request();
     assert!(!player.send_for_request(first, Cmd::Wave(Source::Wave)));
@@ -2033,4 +2225,57 @@ fn last_failed_like_restores_previous_confirmation() {
     engine.merge_likes(vec!["2".into()]);
     engine.handle(Msg::LikeSaved { id: "2".into(), seq: 4, liked: true, result: Err("offline".into()) });
     assert!(engine.likes.lock().unwrap().contains("2"));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn mpris_relative_seek_starts_at_the_preceding_absolute_seek() {
+    let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
+    engine.current = crate::api::parse_track(&serde_json::json!({"id":1,"title":"A","durationMs":120000}));
+    engine.current_bytes = Some(Arc::from([1]));
+    engine.position_base = Duration::from_secs(10);
+    engine.cmd(Cmd::SeekTrack(crate::mpris::track_id("1"), 30_000_000));
+    engine.cmd(Cmd::SeekBy(5.0));
+    assert_eq!(engine.position_base, Duration::from_secs(35));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn ordered_pause_resume_commands_are_idempotent() {
+    let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
+    for cmd in [Cmd::Pause, Cmd::Pause] { engine.cmd(cmd); }
+    assert!(engine.paused);
+    for cmd in [Cmd::Resume, Cmd::Resume] { engine.cmd(cmd); }
+    assert!(!engine.paused);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn ordered_seeks_follow_the_loading_track() {
+    let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
+    let track = crate::api::parse_track(&serde_json::json!({"id": 7, "title": "A"})).unwrap();
+    engine.history.push(track);
+    engine.cmd(Cmd::Prev);
+    let id = crate::mpris::track_id("7");
+    engine.cmd(Cmd::SeekTrack(id, 30_000_000));
+    engine.cmd(Cmd::SeekBy(2.0));
+    assert_eq!(engine.pos(), 32.0);
+    engine.start_current();
+    assert_eq!(engine.pos(), 0.0);
+}
+
+#[cfg(test)]
+#[test]
+fn unshuffle_updates_a_deferred_list() {
+    let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
+    let tracks: Vec<_> = (0..4).map(|i| {
+        let mut t = crate::api::parse_track(&serde_json::json!({"id":i,"title":"T","explicit":true})).unwrap();
+        t.list_position = Some(i);
+        t
+    }).collect();
+    let deferred = [1, 3, 0, 2].map(|i| tracks[i].clone()).into();
+    engine.list = Some(ListPlay { all: tracks, deferred, after: After::Loop });
+    engine.cmd(Cmd::Shuffle(false));
+    let order: Vec<_> = engine.list.unwrap().deferred.iter().filter_map(|t| t.list_position).collect();
+    assert_eq!(order, [1, 2, 3, 0]);
 }

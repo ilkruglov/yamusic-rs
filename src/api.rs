@@ -11,6 +11,72 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::client::{token_allowed, ANDROID_CLIENT, API_BASE as BASE, MP3_SALT, SIGN_KEY};
 
+// Теги ID3 старый загрузчик заменял своими. Для сравнения берём весь звук после тега.
+pub(crate) fn saved_payload(file: &mut std::fs::File) -> std::io::Result<(u64, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.rewind()?;
+    let mut head = [0; 10];
+    file.read_exact(&mut head)?;
+    let start = crate::tags::existing_id3_len(&head) as u64;
+    let size = file.metadata()?.len().checked_sub(start).filter(|len| *len > 0)
+        .ok_or_else(|| std::io::Error::other("нет аудиоданных"))?;
+    file.seek(SeekFrom::Start(start))?;
+    Ok((start, size))
+}
+
+pub(crate) fn same_saved_files(left: &mut std::fs::File, right: &mut std::fs::File) -> std::io::Result<bool> {
+    use std::io::Seek;
+    right.rewind()?;
+    let len = right.metadata()?.len();
+    same_saved_audio(left, right, Some(len), None)
+}
+
+fn same_saved_audio(local: &mut std::fs::File, remote: impl std::io::Read, length: Option<u64>, checksum: Option<&str>) -> std::io::Result<bool> {
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+    let (start, size) = saved_payload(local)?;
+    let mut remote = remote;
+    let mut head = [0; 10];
+    remote.read_exact(&mut head)?;
+    let tag = crate::tags::existing_id3_len(&head) as u64;
+    if length.is_some_and(|total| total.checked_sub(tag) != Some(size)) { return Ok(false); }
+    let mut remote = Cursor::new(head).chain(remote);
+    let mut md5 = Md5::new();
+    if std::io::copy(&mut remote.by_ref().take(tag), &mut md5)? != tag { return Ok(false); }
+    if let Some(hash) = checksum.filter(|s| s.len() == 32 && s.bytes().all(|c| c.is_ascii_hexdigit())) {
+        // Некоторые CDN используют MD5 всего объекта как сильный ETag.
+        std::io::copy(local, &mut md5)?;
+        if hash.eq_ignore_ascii_case(&format!("{:x}", md5.finalize())) { return Ok(true); }
+        local.seek(SeekFrom::Start(start))?;
+    }
+    let mut a = [0; 16 * 1024];
+    let mut b = [0; 16 * 1024];
+    let mut remaining = size;
+    loop {
+        let n = remote.read(&mut b)?;
+        if n == 0 { return Ok(remaining == 0); }
+        if n as u64 > remaining { return Ok(false); }
+        remaining -= n as u64;
+        local.read_exact(&mut a[..n])?;
+        if a[..n] != b[..n] { return Ok(false); }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_audio_matches_after_tag_replacement() {
+    use std::io::Write;
+    let audio = vec![42; 100_000];
+    let mut remote = vec![b'I', b'D', b'3', 3, 0, 0, 0, 0, 0, 5, 1, 2, 3, 4, 5];
+    remote.extend(&audio);
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&audio).unwrap();
+    let etag = format!("{:x}", Md5::digest(&remote));
+    assert!(same_saved_audio(&mut file, &remote[..], Some(remote.len() as u64), None).unwrap());
+    assert!(same_saved_audio(&mut file, &remote[..15], Some(remote.len() as u64), Some(&etag)).unwrap());
+    remote[20_000] = 17;
+    assert!(!same_saved_audio(&mut file, &remote[..], None, None).unwrap());
+}
+
 pub const WAVE: &str = "user:onyourwave";
 
 pub type Res<T> = Result<T, String>;
@@ -38,9 +104,16 @@ pub struct Named {
 }
 
 #[derive(Clone, Debug)]
+struct PlaylistSlot {
+    revision: u64,
+    index: usize,
+    album: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Track {
-    /// Альбом записи в исходном плейлисте, если указан отдельно от метаданных трека.
-    pub(crate) playlist_album_id: Option<String>,
+    /// Ревизия и серверная позиция строки, выбранной пользователем.
+    playlist_slot: Option<Box<PlaylistSlot>>,
     /// Позиция в исходном списке при воспроизведении. У ручной вставки её нет.
     pub(crate) list_position: Option<usize>,
     pub id: String,
@@ -288,36 +361,37 @@ fn artist_list_counts_unavailable_entries_and_reads_past_ten_pages() {
     assert_eq!(cyclic.len(), 200);
 }
 
-fn playlist_entry_track(item: &Value, mut track: Track) -> Track {
-    track.playlist_album_id = s(item.get("albumId"));
+fn playlist_entry_track(item: &Value, mut track: Track, revision: Option<u64>, index: usize) -> Track {
+    track.playlist_slot = revision.map(|revision| Box::new(PlaylistSlot { revision, index, album: s(item.get("albumId")) }));
     track
 }
 
 fn playlist_remove_index(list: &Value, track: &Track) -> Res<usize> {
     let items = list.get("tracks").and_then(Value::as_array).ok_or("нет списка треков")?;
-    let selected_album = track.playlist_album_id.as_ref().or(track.album_id.as_ref());
-    let mut matches = items.iter().enumerate().filter(|(_, item)| {
-        let id = s(item.get("id")).or_else(|| s(item.pointer("/track/id")));
-        let album = s(item.get("albumId")).or_else(|| s(item.pointer("/track/albums/0/id")));
-        id.as_ref() == Some(&track.id) && (album.is_none() || selected_album.is_none() || album.as_ref() == selected_album)
-    });
-    let (index, _) = matches.next().ok_or("трек уже отсутствует в плейлисте")?;
-    if matches.next().is_some() {
-        return Err("в плейлисте несколько совпадений, удаление отменено".into());
+    let slot = track.playlist_slot.as_ref().ok_or("Нет ревизии показанного плейлиста. Обновите список")?;
+    if list.get("revision").and_then(Value::as_u64) != Some(slot.revision) {
+        return Err("Плейлист изменился. Выберите трек ещё раз после обновления".into());
     }
-    Ok(index)
+    let item = items.get(slot.index).ok_or("трек уже отсутствует в плейлисте")?;
+    let id = s(item.get("id")).or_else(|| s(item.pointer("/track/id")));
+    if id.as_ref() != Some(&track.id) || s(item.get("albumId")) != slot.album {
+        return Err("Запись плейлиста изменилась. Обновите список".into());
+    }
+    Ok(slot.index)
 }
 
 #[cfg(test)]
 #[test]
 fn removal_uses_unfiltered_server_order() {
     let track = parse_track(&json!({"id": 7, "title": "A"})).unwrap();
-    let list = json!({"tracks": [{"id": 1, "available": false}, {"track": {"id": 7}}]});
-    assert_eq!(playlist_remove_index(&list, &track), Ok(1));
-    let albums = json!({"tracks": [{"id":7,"albumId":11},{"id":7,"albumId":10}]});
-    let first = playlist_entry_track(&albums["tracks"][0], track.clone());
-    assert_eq!(playlist_remove_index(&albums, &first), Ok(0));
-    assert!(playlist_remove_index(&json!({"tracks": [{"id":7}, {"id":7}]}), &track).is_err());
+    let list = json!({"revision":12,"tracks":[{"id":1,"available":false},{"id":7,"albumId":3},{"id":7,"albumId":3}]});
+    let selected = playlist_entry_track(&list["tracks"][2], track.clone(), Some(12), 2);
+    assert_eq!(playlist_remove_index(&list, &selected), Ok(2));
+    let mut changed = list.clone();
+    changed["revision"] = json!(13);
+    assert!(playlist_remove_index(&changed, &selected).is_err());
+    assert!(playlist_remove_index(&list, &track).is_err());
+
 }
 
 pub(crate) fn parse_track(v: &Value) -> Option<Track> {
@@ -332,7 +406,7 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
     let li = v.get("lyricsInfo");
     let flag = |k: &str| li.and_then(|l| l.get(k)).and_then(|x| x.as_bool()).unwrap_or(false);
     Some(Track {
-        playlist_album_id: None,
+        playlist_slot: None,
         list_position: None,
         id,
         album_id: album.and_then(|a| s(a.get("id"))),
@@ -1409,13 +1483,14 @@ impl Api {
         let v = self.get(&format!("/users/{uid}/playlists/{kind}"), &[])?;
         let pl = parse_playlist(&v).ok_or("нет данных о плейлисте")?;
         let items = v.get("tracks").and_then(|t| t.as_array()).cloned().unwrap_or_default();
-        let mut tracks: Vec<Track> = items.iter().filter_map(|i| Some(playlist_entry_track(i, parse_track(i.get("track")?)?))).collect();
+        let revision = v.get("revision").and_then(Value::as_u64);
+        let mut tracks: Vec<Track> = items.iter().enumerate().filter_map(|(index, i)| Some(playlist_entry_track(i, parse_track(i.get("track")?)?, revision, index))).collect();
         if tracks.is_empty() && !items.is_empty() {
             let ids: Vec<String> = items.iter().filter_map(|i| s(i.get("id"))).collect();
             let found: std::collections::HashMap<_, _> = self.tracks(&ids)?.into_iter().map(|t| (t.id.clone(), t)).collect();
-            tracks = items.iter().filter_map(|item| {
+            tracks = items.iter().enumerate().filter_map(|(index, item)| {
                 let track = found.get(&s(item.get("id"))?)?;
-                Some(playlist_entry_track(item, track.clone()))
+                Some(playlist_entry_track(item, track.clone(), revision, index))
             }).collect();
         }
         Ok((pl, tracks))
@@ -1463,7 +1538,7 @@ impl Api {
         let revision = v.get("revision").and_then(Value::as_u64).ok_or("нет ревизии плейлиста")?.to_string();
         let at = playlist_remove_index(&v, t)?;
         let mut item = json!({ "id": t.id });
-        if let Some(a) = t.playlist_album_id.as_ref().or(t.album_id.as_ref()) {
+        if let Some(a) = t.playlist_slot.as_ref().and_then(|slot| slot.album.as_ref()).or(t.album_id.as_ref()) {
             item["albumId"] = json!(a);
         }
         let diff = json!([{ "op": "delete", "from": at, "to": at + 1, "tracks": [item] }]).to_string();
@@ -1608,6 +1683,14 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
             .ok_or_else(|| "нет url в downloadInfo".into())
     }
 
+    pub(crate) fn matches_saved_audio(&self, url: &str, file: &mut std::fs::File) -> std::io::Result<bool> {
+        let response = self.http.get(url).send().and_then(|r| r.error_for_status()).map_err(std::io::Error::other)?;
+        let length = response.content_length();
+        let etag = response.headers().get(reqwest::header::ETAG).and_then(|h| h.to_str().ok())
+            .and_then(|v| v.strip_prefix('"')?.strip_suffix('"')).map(str::to_owned);
+        same_saved_audio(file, response, length, etag.as_deref())
+    }
+
     /// Скачать файл потоком на диск, без чтения целиком в память. Ссылки уже подписаны — без токена.
     pub fn download_to(&self, url: &str, path: &std::path::Path) -> Res<u64> {
         let mut resp = self.http.get(url).send().map_err(|e| format!("сеть: {}", crate::config::chain(&e)))?;
@@ -1652,4 +1735,14 @@ mod tests {
     fn pic_size() {
         assert_eq!(pic("avatars.yandex.net/a/%%", 200), "https://avatars.yandex.net/a/200x200");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn shorter_chunked_audio_is_a_different_track() {
+    use std::io::Write;
+    let payload = vec![42; 32_768];
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&payload).unwrap();
+    assert!(!same_saved_audio(&mut file, &payload[..21_000], None, None).unwrap());
 }

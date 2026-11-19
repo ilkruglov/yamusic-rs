@@ -229,6 +229,9 @@ export global App {
     in property <image> list-cover;
     in property <image> list-artist-cover;
     in property <color> list-tint: #00000000;
+    in property <int> list-count;
+    in property <int> list-first;
+    callback list-viewport(int, int);
     in property <[TrackItem]> tracks;
     in property <bool> list-loading;
     in property <int> list-current: -1;
@@ -374,6 +377,9 @@ export global App {
     in property <string> grid-title;
     in property <[string]> grid-tabs;
     in property <int> grid-tab;
+    in property <int> grid-count;
+    in property <int> grid-first;
+    callback grid-viewport(int, int);
     in property <[CardItem]> grid-cards;
     in property <bool> grid-create;
     callback open-grid(string, string);
@@ -496,7 +502,6 @@ export global App {
 
     callback play-list(int);
     callback like-track(int);
-    callback request-cover(int);
     callback filter-changed(string);
 
     callback drag-window();

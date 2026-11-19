@@ -11,6 +11,7 @@ repository = "https://github.com/ilkruglov/yamusic-rs"
 asio = ["dep:winreg", "dep:cc"]
 
 [dependencies]
+tempfile = "3"
 skia-safe = { version = "0.153.3", default-features = false }
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "unstable-fontique-011", "unstable-winit-030"] }
 rodio = { version = "0.20", default-features = false, features = ["symphonia-mp3", "symphonia-aac", "symphonia-isomp4"] }
@@ -32,6 +33,7 @@ winreg = { version = "0.56", optional = true }
 version = "0.59"
 features = [
   "Win32_Foundation",
+  "Win32_Storage_FileSystem",
   "Win32_Security",
   "Win32_UI_WindowsAndMessaging",
   "Win32_Graphics_Gdi",
@@ -50,6 +52,7 @@ features = [
 ]
 
 [target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 # MPRIS на zbus 5, как у slint: второй копии zbus в сборке нет. async-io и futures-lite
 # приходят вместе с zbus и нужны для таймера и ожидания двух задач без tokio.
