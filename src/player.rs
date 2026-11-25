@@ -141,7 +141,7 @@ pub enum Cmd {
     Volume(f32),
     Loudness(Loudness),
     LikeTrack(Track, Option<LikeCompleted>),
-    Dislike(Option<Box<dyn FnOnce() + Send>>),
+    Dislike(Option<LikeCompleted>),
     Wave(Source),
     /// Заново начать «Мою волну» с настройками (seeds `setting…`).
     TuneWave(Vec<String>),
@@ -1709,9 +1709,7 @@ impl Engine {
                 let (uid, tx) = (self.uid.clone(), self.tx.clone());
                 let _ = self.bg.send(Box::new(move || {
                     let result = api.dislike(&uid, &t.full_id(), remove).map_err(|e| format!("Дизлайк не сохранился: {e}"));
-                    if result.is_ok() && !remove {
-                        if let Some(saved) = saved { saved(); }
-                    }
+                    if let Some(saved) = saved { saved(&t, !remove, &result); }
                     let _ = tx.send(Msg::ReactionSaved { id: t.id, seq, reaction, result });
                 }));
                 if !remove { self.advance(End::Dislike); }

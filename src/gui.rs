@@ -4354,10 +4354,9 @@ impl Ctx {
     }
 
     fn dislike(self: &Rc<Self>) {
-        let Some(net) = self.st.borrow().net.clone() else { return };
-        self.player.send(Cmd::Dislike(Some(Box::new(move || {
-            net.refresh("likes");
-            net.refresh("collection");
+        let net = self.st.borrow().net.clone();
+        self.player.send(Cmd::Dislike(Some(Box::new(move |track, added, result| {
+            if let Some(net) = net.filter(|_| added && result.is_ok()) { net.dislike_saved(track); }
         }))));
     }
 
