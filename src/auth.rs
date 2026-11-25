@@ -5,6 +5,9 @@ use crate::client::{OAUTH_BASE, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET};
 use serde_json::Value;
 use std::time::Duration;
 
+/// Права токена, которые просим при входе.
+const SCOPE: &str = "music:content music:read music:write";
+
 pub struct DeviceCode {
     pub device_code: String,
     pub user_code: String,
@@ -41,7 +44,7 @@ fn post(form: &[(&str, &str)], path: &str) -> Result<Value, String> {
 }
 
 /// Постоянный id устройства: Яндекс показывает его в списке устройств аккаунта.
-fn device_id() -> String {
+pub fn device_id() -> String {
     let path = crate::config::dir().join("device");
     if let Ok(id) = std::fs::read_to_string(&path) {
         let id = id.trim().to_string();
@@ -64,7 +67,10 @@ pub fn device_code() -> Result<DeviceCode, String> {
     let host = crate::sys::hostname().unwrap_or_else(|| "PC".into());
     // Это имя Яндекс показывает при вводе кода и в списке устройств аккаунта.
     let name = format!("{} ({host})", env!("APP_NAME"));
-    let v = post(&[("client_id", OAUTH_CLIENT_ID), ("device_id", &id), ("device_name", &name)], "/device/code")?;
+    let v = post(
+        &[("client_id", OAUTH_CLIENT_ID), ("device_id", &id), ("device_name", &name), ("scope", SCOPE)],
+        "/device/code",
+    )?;
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(String::from);
     let n = |k: &str| v.get(k).and_then(|x| x.as_u64());
     match (s("device_code"), s("user_code")) {
@@ -108,6 +114,19 @@ pub fn poll(device_code: &str) -> Poll {
         _ => Poll::Failed(
             v.get("error_description").and_then(|e| e.as_str()).unwrap_or("вход не удался").to_string(),
         ),
+    }
+}
+
+/// Отозвать токен на сервере. Яндекс отзывает только токены, выданные с device_id.
+pub fn revoke(access: &str) -> Result<(), String> {
+    let v = post(
+        &[("access_token", access), ("client_id", OAUTH_CLIENT_ID), ("client_secret", OAUTH_CLIENT_SECRET)],
+        "/revoke_token",
+    )?;
+    if v.get("status").and_then(|s| s.as_str()) == Some("ok") {
+        Ok(())
+    } else {
+        Err(v.get("error_description").and_then(|e| e.as_str()).unwrap_or("Яндекс не отозвал токен").to_string())
     }
 }
 

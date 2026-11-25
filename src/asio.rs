@@ -5,7 +5,7 @@ use rodio::{Sink, Source};
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
 
@@ -15,6 +15,7 @@ unsafe extern "C" {
         out: *mut *mut c_void,
         rate: *mut u32,
         channels: *mut u16,
+        frames: *mut u32,
     ) -> *const c_char;
     fn ya_asio_start(
         handle: *mut c_void,
@@ -85,7 +86,7 @@ impl Drop for Handle {
 pub(crate) struct Stream {
     // Останавливаем обработчики до освобождения микшера.
     handle: Handle,
-    render_state: Box<UnsafeCell<Mixer>>,
+    render_state: Box<UnsafeCell<RenderBuffers>>,
     controller: Arc<DynamicMixerController<f32>>,
     rate: u32,
     callbacks: u32,
@@ -113,10 +114,44 @@ impl Mixer {
     }
 }
 
+// Декодер может ждать сеть. Вызов драйвера берёт только готовый блок или выдаёт тишину.
+struct RenderBuffers {
+    ready: mpsc::Receiver<Box<[f32]>>,
+    free: mpsc::SyncSender<Box<[f32]>>,
+}
+
+impl RenderBuffers {
+    fn new(mut mixer: Mixer, samples: usize) -> std::io::Result<Self> {
+        let (free, spare) = mpsc::sync_channel(2);
+        let (filled, ready) = mpsc::sync_channel(2);
+        for _ in 0..2 {
+            free.send(vec![0.0; samples].into_boxed_slice()).unwrap();
+        }
+        std::thread::Builder::new().name("asio-mix".into()).spawn(move || {
+            while let Ok(mut block) = spare.recv() {
+                mixer.fill(&mut block);
+                if filled.send(block).is_err() { break; }
+            }
+        })?;
+        Ok(Self { ready, free })
+    }
+
+    fn fill(&mut self, out: &mut [f32]) {
+        match self.ready.try_recv() {
+            Ok(block) => {
+                out.copy_from_slice(&block);
+                // Из двух заранее выделенных блоков один сейчас у нас.
+                let _ = self.free.try_send(block);
+            }
+            Err(_) => out.fill(0.0),
+        }
+    }
+}
+
 extern "C" fn render(ctx: *mut c_void, samples: *mut f32, count: usize) {
     // buffer_switch защищает микшер от одновременного и рекурсивного вызова.
-    let mixer = unsafe { &mut *ctx.cast::<Mixer>() };
-    mixer.fill(unsafe { std::slice::from_raw_parts_mut(samples, count) });
+    let buffers = unsafe { &mut *ctx.cast::<RenderBuffers>() };
+    buffers.fill(unsafe { std::slice::from_raw_parts_mut(samples, count) });
 }
 
 // До первого сэмпла очередь Rodio сообщает формат моно.
@@ -179,17 +214,19 @@ impl Stream {
             })
             .ok_or_else(|| fail("драйвер не найден или требует повторного выбора"))?;
         let id: Vec<_> = clsid.encode_utf16().chain([0]).collect();
-        let (mut handle, mut rate, mut channels) = (std::ptr::null_mut(), 0, 0);
-        let error = unsafe { ya_asio_open(id.as_ptr(), &mut handle, &mut rate, &mut channels) };
+        let (mut handle, mut rate, mut channels, mut frames) = (std::ptr::null_mut(), 0, 0, 0);
+        let error = unsafe { ya_asio_open(id.as_ptr(), &mut handle, &mut rate, &mut channels, &mut frames) };
         if !error.is_null() {
             return Err(fail(&unsafe { CStr::from_ptr(error) }.to_string_lossy()));
         }
         let handle = Handle(NonNull::new(handle).ok_or_else(|| fail("нет устройства"))?);
         let (controller, stereo) = mixer(2, rate);
+        let buffers = RenderBuffers::new(Mixer { stereo, channels }, frames as usize * usize::from(channels))
+            .map_err(|e| fail(&e.to_string()))?;
         let stream = Self {
             handle,
             controller,
-            render_state: Box::new(UnsafeCell::new(Mixer { stereo, channels })),
+            render_state: Box::new(UnsafeCell::new(buffers)),
             rate,
             callbacks: 0,
             last_callback: Instant::now(),
@@ -247,6 +284,35 @@ mod tests {
                     .iter()
                     .all(|frame| *frame == [0.0, 0.75]));
             }
+        }
+    }
+
+    #[test]
+    fn callback_returns_silence_while_the_source_waits_for_data() {
+        let (control, stereo) = mixer(2, 48000);
+        let (release, gate) = mpsc::channel();
+        let (entered, worker) = mpsc::channel();
+        let mut pending = true;
+        let track = rodio::buffer::SamplesBuffer::new(2, 48000, vec![0.5; 256]);
+        control.add(track.periodic_access(Duration::ZERO, move |_| {
+            if pending {
+                pending = false;
+                entered.send(()).unwrap();
+                gate.recv().unwrap();
+            }
+        }));
+        let mut buffers = RenderBuffers::new(Mixer { stereo, channels: 2 }, 16).unwrap();
+        worker.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut out = [1.0; 16];
+        buffers.fill(&mut out);
+        assert_eq!(out, [0.0; 16]);
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            buffers.fill(&mut out);
+            if out == [0.5; 16] { break; }
+            assert!(Instant::now() < deadline, "буфер не получил звук после возобновления источника");
+            std::thread::yield_now();
         }
     }
 

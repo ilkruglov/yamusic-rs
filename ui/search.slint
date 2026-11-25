@@ -1,7 +1,7 @@
 // Поиск: вкладки «Популярное» и «История», результаты по типам.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, Shimmer, NavArrows, Field } from "widgets.slint";
+import { Icons, Icon, Cover, Shimmer, NavArrows, Field, ScrollBar } from "widgets.slint";
 import { T, App, ChartRow } from "state.slint";
 import { TrackRow, BlockHeader, Tab, ChartLine } from "rows.slint";
 import { Shelf, CarouselArrow } from "shelf.slint";
@@ -12,6 +12,8 @@ export component SearchPage inherits Rectangle {
     property <bool> typing: App.search-text != "";
     property <length> header-h: typing ? 92px : 172px;
     property <length> col-w: (self.width - 2 * pad - 24px) / 2;
+    property <bool> tracks-only: App.search-tracks-only;
+    changed tracks-only => { flick.content-y = 0px; }
 
     flick := Flickable {
         y: 0;
@@ -82,7 +84,7 @@ export component SearchPage inherits Rectangle {
                         border-radius: Theme.radius-size-s;
                     }
                 }
-                if !App.results-loading && App.sr-tracks.length == 0 && App.sr-artists.length == 0 && App.sr-albums.length == 0: Text {
+                if !App.results-loading && App.sr-tracks.length == 0 && App.sr-artists.length == 0 && App.sr-albums.length == 0 && App.sr-playlists.length == 0: Text {
                     text: T.t("Ничего не нашлось");
                     font-family: App.headline-font;
                     font-size: Theme.font-size-headline-s;
@@ -90,13 +92,28 @@ export component SearchPage inherits Rectangle {
                     color: Theme.controls-color-primary-text-enabled-variant;
                 }
                 if App.sr-tracks.length > 0: Rectangle {
-                    height: 44px + min(4, ceil(App.sr-tracks.length / 2)) * 56px + 40px;
-                    BlockHeader { x: 0; y: 0; text: T.t("Треки"); }
+                    property <int> row-count: tracks-only ? App.sr-tracks.length : min(4, ceil(App.sr-tracks.length / 2.0));
+                    height: 44px + row-count * 56px + 40px;
+                    if !tracks-only: BlockHeader {
+                        x: 0;
+                        y: 0;
+                        text: T.t("Треки");
+                        clicked => { App.open-search-tracks(); }
+                    }
+                    if tracks-only: Text {
+                        x: 0;
+                        y: 0;
+                        text: T.t("Треки");
+                        font-family: "YS Music Headline";
+                        font-size: Theme.font-size-headline-m;
+                        font-weight: 700;
+                        color: Theme.controls-color-primary-text-enabled-variant;
+                    }
                     for t[i] in App.sr-tracks: TrackRow {
-                        x: floor(i / 4) * (col-w + 24px);
-                        y: 44px + mod(i, 4) * 56px;
-                        width: col-w;
-                        visible: i < 8;
+                        x: tracks-only ? 0px : floor(i / row-count) * (col-w + 24px);
+                        y: 44px + mod(i, row-count) * 56px;
+                        width: tracks-only ? parent.width : col-w;
+                        visible: tracks-only || i < 8;
                         item: t;
                         block: "results";
                         index: i;
@@ -104,9 +121,9 @@ export component SearchPage inherits Rectangle {
                         like => { App.like-result(i); }
                     }
                 }
-                Shelf { title: T.t("Исполнители"); block: "sr-artists"; items: App.sr-artists; size: 186px; arrows: false; }
-                Shelf { title: T.t("Альбомы"); block: "sr-albums"; items: App.sr-albums; size: 186px; arrows: false; }
-                Shelf { title: T.t("Плейлисты"); block: "sr-playlists"; items: App.sr-playlists; size: 186px; arrows: false; }
+                if !tracks-only: Shelf { title: T.t("Исполнители"); block: "sr-artists"; items: App.sr-artists; size: 186px; arrows: false; }
+                if !tracks-only: Shelf { title: T.t("Альбомы"); block: "sr-albums"; items: App.sr-albums; size: 186px; arrows: false; }
+                if !tracks-only: Shelf { title: T.t("Плейлисты"); block: "sr-playlists"; items: App.sr-playlists; size: 186px; arrows: false; }
             }
         }
     }
@@ -175,5 +192,13 @@ export component SearchPage inherits Rectangle {
             Tab { text: T.t("Популярное"); selected: App.search-tab == 0; clicked => { App.search-tab = 0; } }
             Tab { text: T.t("История"); selected: App.search-tab == 1; clicked => { App.search-tab = 1; } }
         }
+    }
+    // Полоса — под шапкой: выше неё страница закрыта.
+    ScrollBar {
+        y: header-h - 24px;
+        height: root.height - self.y;
+        content-y <=> flick.content-y;
+        content-height: flick.content-height - self.y;
+        field-focused: field.has-focus;
     }
 }

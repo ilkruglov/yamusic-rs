@@ -40,6 +40,31 @@ pub fn desktop_client() -> &'static str {
     })
 }
 
+/// Заголовок `X-Yandex-Music-Device` в формате десктопного клиента:
+/// `manufacturer=; model=; uuid=…; os=win32; os_version=; device_id=…; clid=0`.
+/// uuid и device_id выводятся из постоянного id устройства (файл `device`), поэтому
+/// между запусками не меняются.
+/// Версия Android-клиента 2026.11.2: под неё сервер отдаёт нынешние страницы.
+#[cfg(target_os = "android")]
+pub const ANDROID_APP_CLIENT: &str = "YandexMusicAndroid/24026572";
+
+#[cfg(target_os = "android")]
+pub fn mobile_device_header() -> &'static str {
+    static HEADER: OnceLock<String> = OnceLock::new();
+    HEADER.get_or_init(|| device_header().replace("os=win32; os_version=", "os=Android; os_version=15"))
+}
+
+pub fn device_header() -> &'static str {
+    static HEADER: OnceLock<String> = OnceLock::new();
+    HEADER.get_or_init(|| {
+        use sha2::{Digest, Sha256};
+        let id = crate::auth::device_id();
+        let uuid = format!("{}-{}-{}-{}-{}", &id[..8], &id[8..12], &id[12..16], &id[16..20], &id[20..32]);
+        let device: String = Sha256::digest(id.as_bytes()).iter().map(|x| format!("{x:02x}")).collect();
+        format!("manufacturer=; model=; uuid={uuid}; os=win32; os_version=; device_id={device}; clid=0")
+    })
+}
+
 /// Токен уходит только по https и только на хосты Яндекса.
 pub fn token_allowed(url: &reqwest::Url) -> bool {
     if url.scheme() != "https" {

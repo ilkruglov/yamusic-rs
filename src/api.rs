@@ -7,6 +7,7 @@ use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::Method;
 use serde_json::{json, Value};
 use sha2::Sha256;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::client::{token_allowed, ANDROID_CLIENT, API_BASE as BASE, MP3_SALT, SIGN_KEY};
@@ -78,6 +79,8 @@ fn legacy_audio_matches_after_tag_replacement() {
 }
 
 pub const WAVE: &str = "user:onyourwave";
+/// Срок одного запроса к аудиофайлу. Что не успело скачаться, докачает следующий запрос.
+const STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub type Res<T> = Result<T, String>;
 
@@ -101,6 +104,9 @@ pub struct Named {
     pub id: String,
     pub name: String,
     pub cover: Option<String>,
+    /// Фото без фона: телефон ставит его над названием трека в «Моей волне».
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub cutout: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -134,9 +140,26 @@ pub struct Track {
     pub position: Option<u32>,
     /// Пакет волны, из которого пришёл трек: с ним уходит фидбек по этому треку.
     pub batch_id: String,
+    /// Оттенок и энергия трека: по ним «Моя волна» на телефоне красит фон.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub mood: Option<Mood>,
+}
+
+/// `trackParameters` из ответа API.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub struct Mood {
+    pub hue: f32,
+    pub energy: f32,
 }
 
 impl Track {
+    /// Тот же трек, но не привязанный к строке показанного плейлиста.
+    pub fn detached(mut self) -> Self {
+        self.playlist_slot = None;
+        self
+    }
+
     /// "trackId:albumId" — такой формат ждут лайки и фидбек волны.
     pub fn full_id(&self) -> String {
         match &self.album_id {
@@ -186,6 +209,8 @@ pub struct Playlist {
     pub likes: u64,
     /// Логин владельца — им адресуется плейлист в коде для вставки.
     pub login: String,
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub track_count: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -203,9 +228,9 @@ pub struct Collection {
     pub likes_count: u64,
     pub likes_cover: Option<String>,
     pub likes_preview: Vec<Track>,
-    pub top_artists: Vec<TopArtist>,
-    pub playlist_tabs: Vec<(String, Vec<Playlist>)>,
-    pub album_tabs: Vec<(String, Vec<Album>)>,
+    pub top_artists: Arc<[TopArtist]>,
+    pub playlist_tabs: Arc<[(String, Vec<Playlist>)]>,
+    pub album_tabs: Arc<[(String, Vec<Album>)]>,
 }
 
 /// Вайб на колесе «Моей волны».
@@ -215,7 +240,23 @@ pub struct WheelItem {
     pub description: String,
     pub cover: Option<String>,
     pub round: bool,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub control_accent: bool,
     pub seeds: Vec<String>,
+    /// Цвет обложки: по его оттенку телефонный клиент красит подложку карточки.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub color: Option<[u8; 3]>,
+}
+
+impl WheelItem {
+    /// Станция ротора для карточки; None — обычная «Моя волна».
+    pub fn station(&self) -> Option<String> {
+        let seed = self.seeds.first().filter(|s| s.as_str() != WAVE)?;
+        Some(match seed.split_once(':') {
+            Some(("artist-tracks", id)) => format!("artist:{id}"),
+            _ => seed.clone(),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -258,6 +299,31 @@ pub struct Lyrics {
     pub source: String,
     pub text: Vec<String>,
     pub writers: String,
+}
+
+/// Откуда брать следующий пакет волны.
+pub enum WaveSession {
+    New,
+    /// Новая «Моя волна» с этими настройками (seeds `setting…`).
+    Tuned(Vec<String>),
+    Next(String),
+    Clone(String),
+}
+
+/// Группа настроек «Моей волны»: «По характеру», «Под настроение» или «По языку».
+#[derive(Clone, Debug)]
+pub struct WaveSettingGroup {
+    pub name: String,
+    pub options: Vec<WaveSettingOption>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WaveSettingOption {
+    pub name: String,
+    pub seed: String,
+    pub image: Option<String>,
+    /// «Любое»: настройка не задана.
+    pub any: bool,
 }
 
 pub struct Batch {
@@ -312,6 +378,7 @@ fn artists_of(v: &Value) -> Vec<Named> {
                         id: s(x.get("id")).unwrap_or_default(),
                         name: x.get("name")?.as_str()?.to_string(),
                         cover: x.pointer("/cover/uri").and_then(|u| u.as_str()).map(String::from),
+                        cutout: x.pointer("/cutoutCover/uri").and_then(|u| u.as_str()).map(String::from),
                     })
                 })
                 .collect()
@@ -366,9 +433,16 @@ fn playlist_entry_track(item: &Value, mut track: Track, revision: Option<u64>, i
     track
 }
 
-fn playlist_remove_index(list: &Value, track: &Track) -> Res<usize> {
+fn playlist_remove_index(list: &Value, track: &Track, first_match: bool) -> Res<usize> {
     let items = list.get("tracks").and_then(Value::as_array).ok_or("нет списка треков")?;
-    let slot = track.playlist_slot.as_ref().ok_or("Нет ревизии показанного плейлиста. Обновите список")?;
+    let Some(slot) = track.playlist_slot.as_ref() else {
+        if !first_match { return Err("Нет ревизии показанного плейлиста. Обновите список".into()); }
+        // Трек открыт не из этого плейлиста: убираем первое его вхождение.
+        return items
+            .iter()
+            .position(|item| s(item.get("id")).or_else(|| s(item.pointer("/track/id"))).as_ref() == Some(&track.id))
+            .ok_or_else(|| "трека нет в плейлисте".into());
+    };
     if list.get("revision").and_then(Value::as_u64) != Some(slot.revision) {
         return Err("Плейлист изменился. Выберите трек ещё раз после обновления".into());
     }
@@ -386,12 +460,12 @@ fn removal_uses_unfiltered_server_order() {
     let track = parse_track(&json!({"id": 7, "title": "A"})).unwrap();
     let list = json!({"revision":12,"tracks":[{"id":1,"available":false},{"id":7,"albumId":3},{"id":7,"albumId":3}]});
     let selected = playlist_entry_track(&list["tracks"][2], track.clone(), Some(12), 2);
-    assert_eq!(playlist_remove_index(&list, &selected), Ok(2));
+    assert_eq!(playlist_remove_index(&list, &selected, false), Ok(2));
     let mut changed = list.clone();
     changed["revision"] = json!(13);
-    assert!(playlist_remove_index(&changed, &selected).is_err());
-    assert!(playlist_remove_index(&list, &track).is_err());
-
+    assert!(playlist_remove_index(&changed, &selected, false).is_err());
+    assert!(playlist_remove_index(&list, &track, false).is_err());
+    assert_eq!(playlist_remove_index(&list, &track, true), Ok(1));
 }
 
 pub(crate) fn parse_track(v: &Value) -> Option<Track> {
@@ -424,7 +498,14 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
         year: album.and_then(|a| a.get("year")).and_then(|y| y.as_u64()).map(|y| y as u32),
         position: album.and_then(|a| a.pointer("/trackPosition/index")).and_then(|y| y.as_u64()).map(|y| y as u32),
         batch_id: String::new(),
+        mood: mood_of(v),
     })
+}
+
+fn mood_of(v: &Value) -> Option<Mood> {
+    let p = v.get("trackParameters")?;
+    let f = |k: &str| p.get(k).and_then(|x| x.as_f64()).map(|x| x as f32);
+    Some(Mood { hue: f("hue")?, energy: f("energy").unwrap_or(0.5) })
 }
 
 pub(crate) fn parse_artist(v: &Value) -> Option<Artist> {
@@ -490,6 +571,7 @@ pub(crate) fn parse_playlist(v: &Value) -> Option<Playlist> {
         color: hex_color(v.pointer("/derivedColors/average")),
         likes: v.get("likesCount").and_then(|c| c.as_u64()).unwrap_or(0),
         login: owner.map(|o| str_of(o, "login")).unwrap_or_default(),
+        track_count: v.get("trackCount").and_then(|c| c.as_u64()).unwrap_or(0),
     })
 }
 
@@ -502,12 +584,15 @@ pub static LESS_AI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// пропускает треки с пометкой E, как оригинал с фильтром очереди.
 pub static ALLOW_EXPLICIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// «Добавлять треки в конец плейлиста».
+pub static ADD_TO_END: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn allow_explicit() -> bool {
     ALLOW_EXPLICIT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Время для фидбека сессий — ISO 8601 в UTC, как `new Date().toISOString()`.
-fn iso_now() -> String {
+pub fn iso_now() -> String {
     let d = now();
     let secs = d.as_secs() as i64;
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
@@ -976,6 +1061,10 @@ impl Api {
         Api { http, token: token.trim().to_string() }
     }
 
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     /// Настройки аккаунта: `aiContentReductionEnabled` и прочее.
     pub fn account_settings(&self) -> Res<Value> {
         self.get("/account/settings", &[])
@@ -988,6 +1077,18 @@ impl Api {
     /// Запрос к API или по адресу из ответа сервера. Токен добавляется, только если адрес
     /// https и на хосте Яндекса: подменённый ответ не уведёт его на чужой сервер.
     fn req(&self, method: Method, path_or_url: &str) -> RequestBuilder {
+        self.req_as(method, path_or_url, ANDROID_CLIENT)
+    }
+
+    /// Запрос от имени десктопного клиента, с теми же заголовками, что у оригинала.
+    /// Заголовок клиента ровно один: reqwest не заменяет заголовок, а добавляет второй.
+    fn desktop_req(&self, method: Method, path: &str) -> RequestBuilder {
+        self.req_as(method, path, crate::client::desktop_client())
+            .header("X-Yandex-Music-Device", crate::client::device_header())
+            .header("X-Yandex-Music-Without-Invocation-Info", "1")
+    }
+
+    fn req_as(&self, method: Method, path_or_url: &str, client: &str) -> RequestBuilder {
         let url = if path_or_url.starts_with("https://") || path_or_url.starts_with("http://") {
             path_or_url.to_string()
         } else {
@@ -997,7 +1098,7 @@ impl Api {
         let mut rb = self
             .http
             .request(method, url)
-            .header("X-Yandex-Music-Client", ANDROID_CLIENT)
+            .header("X-Yandex-Music-Client", client)
             .header("Accept-Language", lang());
         if trusted && !self.token.is_empty() {
             rb = rb.header("Authorization", format!("OAuth {}", self.token));
@@ -1054,12 +1155,26 @@ impl Api {
     }
 
     /// Блоки лендингов отвечают так же, как официальному приложению для Windows.
+    #[cfg(not(target_os = "android"))]
     pub fn get_raw(&self, path: &str) -> Res<Value> {
-        let (status, text) = self.send_text(
-            self.req(Method::GET, path)
-                .header("X-Yandex-Music-Client", crate::client::desktop_client())
-                .header("X-Yandex-Music-Without-Invocation-Info", "1"),
-        )?;
+        self.send_raw(self.desktop_req(Method::GET, path))
+    }
+
+    /// На телефоне блоки как у мобильного клиента: сервер собирает страницы по его версии.
+    #[cfg(target_os = "android")]
+    pub fn get_raw(&self, path: &str) -> Res<Value> {
+        let rb = self
+            .req_as(Method::GET, path, crate::client::ANDROID_APP_CLIENT)
+            .header("X-Yandex-Music-Device", crate::client::mobile_device_header());
+        self.send_raw(rb)
+    }
+
+    pub fn post_raw(&self, path: &str, body: &Value) -> Res<Value> {
+        self.send_raw(self.desktop_req(Method::POST, path).json(body))
+    }
+
+    fn send_raw(&self, rb: RequestBuilder) -> Res<Value> {
+        let (status, text) = self.send_text(rb)?;
         if !status.is_success() {
             return Err(format!("HTTP {status}: {}", short(&text)));
         }
@@ -1091,19 +1206,26 @@ impl Api {
         v.pointer("/cover/uri").and_then(|u| u.as_str()).map(String::from)
     }
 
-    pub fn collection(&self, uid: &str) -> Res<Collection> {
+    pub fn collection_likes(&self) -> Res<(u64, Vec<Track>)> {
         let likes = self.get_raw("/landing-blocks/collection/playlist-with-likes?count=8")?;
+        let count = likes.pointer("/summary/count").and_then(|c| c.as_u64()).unwrap_or(0);
+        let tracks = likes.get("tracks").and_then(|t| t.as_array()).map(|a| a.iter().filter_map(parse_track).collect()).unwrap_or_default();
+        Ok((count, tracks))
+    }
+
+    pub fn collection(&self, uid: &str) -> Res<Collection> {
+        let (likes_count, likes_preview) = self.collection_likes()?;
         let top = self.get_raw("/personal/top/artists/month?count=5").unwrap_or_default();
         let pls = self.get_raw("/landing-blocks/collection/playlists-liked-and-playlists-created?count=8").unwrap_or_default();
         let albums = self.get_raw("/landing-blocks/collection/albums-liked-and-albums-presaved?count=8").unwrap_or_default();
         let likes_cover = self.likes_cover(uid);
         Ok(Collection {
-            likes_count: likes.pointer("/summary/count").and_then(|c| c.as_u64()).unwrap_or(0),
+            likes_count,
             likes_cover,
-            likes_preview: likes.get("tracks").and_then(|t| t.as_array()).map(|a| a.iter().filter_map(parse_track).collect()).unwrap_or_default(),
+            likes_preview,
             top_artists: top.get("artists").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(parse_top_artist).collect()).unwrap_or_default(),
-            playlist_tabs: tabs(&pls, "playlist", parse_playlist),
-            album_tabs: tabs(&albums, "album", parse_album),
+            playlist_tabs: tabs(&pls, "playlist", parse_playlist).into(),
+            album_tabs: tabs(&albums, "album", parse_album).into(),
         })
     }
 
@@ -1144,6 +1266,11 @@ impl Api {
         let tracks = self.get_raw(&format!("/artists/{id}/tracks")).unwrap_or_default();
         let fam = self.get_raw(&format!("/artists/{id}/familiar-you/info?withWaveInfo=true&withCollectionInfo=true")).unwrap_or_default();
         let block = |b: &str| cards(&self.get_raw(&format!("/artists/{id}/blocks/{b}")).unwrap_or_default());
+        // Сервер отдаёт альбомы вперемешку, у оригинала новые идут первыми (#52).
+        let by_year = |mut v: Vec<Card>| {
+            v.sort_by_key(|c| std::cmp::Reverse(c.year.get(..4).and_then(|y| y.parse::<u32>().ok()).unwrap_or(0)));
+            v
+        };
         Ok(ArtistFull {
             id: a.id.clone(),
             name: a.name.clone(),
@@ -1154,8 +1281,8 @@ impl Api {
             familiar_tracks: fam.pointer("/collection/trackCount").and_then(|x| x.as_u64()).unwrap_or(0)
                 + fam.pointer("/wave/trackCount").and_then(|x| x.as_u64()).unwrap_or(0),
             familiar_albums: fam.pointer("/collection/albumCount").and_then(|x| x.as_u64()).unwrap_or(0),
-            studio: block("artist-studio-albums"),
-            albums: block("artist-albums"),
+            studio: by_year(block("artist-studio-albums")),
+            albums: by_year(block("artist-albums")),
             playlists: block("artist-playlists"),
             compilations: block("artist-compilations"),
             similar: block("similar-artists"),
@@ -1178,12 +1305,7 @@ impl Api {
                 _ => return Err(format!("нельзя закрепить {target}")),
             }
         };
-        let (status, text) = self.send_text(
-            self.req(method, path)
-                .header("X-Yandex-Music-Client", crate::client::desktop_client())
-                .query(&query)
-                .json(&body),
-        )?;
+        let (status, text) = self.send_text(self.desktop_req(method, path).query(&query).json(&body))?;
         if status.is_success() {
             Ok(())
         } else {
@@ -1203,6 +1325,11 @@ impl Api {
             .map(|_| ())
     }
 
+    /// Всё содержимое блока лендинга, как на странице `entities` оригинала: первая страница, 100 карточек.
+    pub fn block_entities(&self, id: &str) -> Res<Vec<Card>> {
+        Ok(cards(&self.get_raw(&format!("/landing/block/{id}/entities?page=0&pageSize=100"))?))
+    }
+
     /// Вкладки «Смотреть всё» коллекции: block — playlists-liked-and-playlists-created или albums-liked-and-albums-presaved.
     pub fn collection_tabs(&self, block: &str) -> Res<Vec<(String, Vec<Card>)>> {
         let v = self.get_raw(&format!("/landing-blocks/collection/{block}?count=500"))?;
@@ -1213,9 +1340,10 @@ impl Api {
         })
     }
 
-    /// Все альбомы исполнителя: path — direct-albums или also-albums, sort — year или rating.
-    pub fn artist_albums(&self, id: &str, path: &str, sort: &str) -> Res<Vec<Card>> {
-        let v = self.get_raw(&format!("/artists/{id}/{path}?page=0&page-size=200&sort-by={sort}"))?;
+    /// Все альбомы исполнителя: path — discography-albums (студийные), direct-albums или also-albums (сборники).
+    /// От новых к старым: страницы альбомов оригинала всегда просят `sort-by=year` (#91).
+    pub fn artist_albums(&self, id: &str, path: &str) -> Res<Vec<Card>> {
+        let v = self.get_raw(&format!("/artists/{id}/{path}?page=0&page-size=200&sort-by=year"))?;
         Ok(v.get("albums").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(parse_album).map(|a| album_card(&a)).collect()).unwrap_or_default())
     }
 
@@ -1263,12 +1391,7 @@ impl Api {
     }
 
     pub fn wheel(&self) -> Res<Vec<WheelItem>> {
-        let (status, text) = self.send_text(
-            self.req(Method::POST, "/wheel/new")
-                .header("X-Yandex-Music-Client", crate::client::desktop_client())
-                .header("X-Yandex-Music-Without-Invocation-Info", "1")
-                .json(&json!({})),
-        )?;
+        let (status, text) = self.send_text(self.desktop_req(Method::POST, "/wheel/new").json(&json!({})))?;
         if !status.is_success() {
             return Err(format!("HTTP {status}: {}", short(&text)));
         }
@@ -1285,6 +1408,8 @@ impl Api {
                             description: str_of(it, "description"),
                             cover: d.pointer("/agent/cover/uri").and_then(|u| u.as_str()).map(String::from),
                             round: d.pointer("/agent/entity/type").and_then(|t| t.as_str()) == Some("artist"),
+                            control_accent: it.get("style").and_then(Value::as_str) == Some("CONTROL_ACCENT"),
+                            color: hex_color(d.pointer("/agent/cover/color")),
                             seeds: d
                                 .pointer("/wave/seeds")
                                 .and_then(|s| s.as_array())
@@ -1295,6 +1420,21 @@ impl Api {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    /// Похожие треки, как в блоке под плеером телефона.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn similar_tracks(&self, track_id: &str) -> Res<Vec<Track>> {
+        let v = self.get(&format!("/tracks/{track_id}/similar"), &[])?;
+        Ok(v.get("similarTracks").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(parse_track).collect()).unwrap_or_default())
+    }
+
+    /// Исполнитель и сколько человек слушали его за месяц.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn artist_brief(&self, id: &str) -> Res<(Artist, Option<u64>)> {
+        let info = self.get_raw(&format!("/artists/{id}/brief-info"))?;
+        let a = info.get("artist").and_then(parse_artist).ok_or("нет данных об исполнителе")?;
+        Ok((a, info.pointer("/stats/lastMonthListeners").and_then(|x| x.as_u64())))
     }
 
     pub fn pins(&self) -> Res<Vec<Pin>> {
@@ -1316,40 +1456,58 @@ impl Api {
     // ---------- волна ----------
 
     fn session_req(&self, path: &str, body: &Value) -> Res<Value> {
-        let mut rb = self
-            .req(Method::POST, path)
-            .header("X-Yandex-Music-Client", crate::client::desktop_client())
-            .header("X-Yandex-Music-Without-Invocation-Info", "1")
-            .json(body);
+        let mut rb = self.desktop_req(Method::POST, path).json(body);
         if LESS_AI.load(std::sync::atomic::Ordering::Relaxed) {
             rb = rb.header("X-Yandex-Music-AI-Content-Rate", "reduced");
         }
-        let (status, text) = self.send_text(rb)?;
-        if !status.is_success() {
-            return Err(format!("HTTP {status}: {}", short(&text)));
-        }
-        let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        Ok(v.get("result").cloned().unwrap_or(v))
+        self.send_raw(rb)
     }
 
-    /// Треки волны через сессию ротора, как у оригинала: новая сессия по seeds,
-    /// дальше `/tracks` с недавней очередью. Отложенные фидбеки (пропуск, дослушал) уходят
-    /// в том же запросе, чтобы сервер подбирал следующие треки уже с их учётом.
-    /// Истёкшую сессию заменяем новой.
-    pub fn wave_session(&self, station: &str, session: Option<&str>, queue: &[String], feedbacks: &[Value]) -> Res<Batch> {
-        if let Some(id) = session.filter(|s| !s.is_empty()) {
-            let mut body = json!({ "queue": queue });
-            if !feedbacks.is_empty() {
-                body["feedbacks"] = json!(feedbacks);
+    /// Треки волны через сессию ротора, как у оригинала.
+    ///
+    /// `Session::Next` — следующий пакет: в `queue` уходят трек, на котором сменился трек, и
+    /// тот, что заиграл после него, а с ними отложенные фидбеки (пропуск, дослушал), чтобы
+    /// сервер подбирал треки уже с их учётом. `Session::Clone` — продолжение волны после
+    /// перезапуска: сервер заводит новую сессию с историей старой. Если сессия истекла или
+    /// её нет, начинается новая.
+    pub fn wave_session(&self, station: &str, session: WaveSession, queue: &[String], feedbacks: &[Value]) -> Res<Batch> {
+        match &session {
+            WaveSession::Next(id) => {
+                let mut body = json!({ "queue": queue });
+                if !feedbacks.is_empty() {
+                    body["feedbacks"] = json!(feedbacks);
+                }
+                match self.session_req(&format!("/rotor/session/{id}/tracks"), &body) {
+                    Ok(v) => return parse_batch(&v, id.to_string()),
+                    Err(e) => crate::config::log(format!("сессия {id}: {e}, начинаем новую")),
+                }
             }
-            match self.session_req(&format!("/rotor/session/{id}/tracks"), &body) {
-                Ok(v) => return parse_batch(&v, id.to_string()),
-                Err(e) => crate::config::log(format!("сессия {id}: {e}, начинаем новую")),
+            WaveSession::Clone(id) => {
+                let mut body = json!({
+                    "queue": queue,
+                    "includeTracksInResponse": true,
+                    "includeWaveModel": true,
+                    "interactive": false,
+                });
+                if !allow_explicit() {
+                    body["allowExplicit"] = json!(false);
+                }
+                match self.session_req(&format!("/rotor/session/{id}/clone"), &body) {
+                    Ok(v) => {
+                        let id = str_of(&v, "radioSessionId");
+                        return parse_batch(&v, id);
+                    }
+                    Err(e) => crate::config::log(format!("сессия {id}: {e}, начинаем новую")),
+                }
             }
+            WaveSession::New | WaveSession::Tuned(_) => {}
         }
         let mut seeds = vec![station.to_string()];
         if station == WAVE {
-            seeds.extend(self.wave_settings());
+            match session {
+                WaveSession::Tuned(settings) => seeds.extend(settings.into_iter().filter(|s| !s.is_empty())),
+                _ => seeds.extend(self.wave_settings()),
+            }
         }
         let mut body = json!({
             "seeds": seeds,
@@ -1357,12 +1515,6 @@ impl Api {
             "includeWaveModel": true,
             "interactive": true,
         });
-        if !queue.is_empty() {
-            body["queue"] = json!(queue);
-        }
-        if LESS_AI.load(std::sync::atomic::Ordering::Relaxed) {
-            body["aiContentReductionEnabled"] = json!(true);
-        }
         if !allow_explicit() {
             body["allowExplicit"] = json!(false);
         }
@@ -1371,9 +1523,26 @@ impl Api {
         parse_batch(&v, id)
     }
 
+    /// История прослушиваний: оригинал шлёт её при каждой смене трека. Без неё сервер не знает,
+    /// что звучало, и рекомендации (волна в том числе) не подстраиваются под вкус.
+    pub fn plays(&self, uid: &str, play: &Value) -> Res<()> {
+        let now = iso_now();
+        let rb = self
+            .desktop_req(Method::POST, "/plays")
+            .header("X-Yandex-Music-Multi-Auth-User-Id", uid)
+            .query(&[("clientNow", now.as_str())])
+            .json(&json!({ "plays": [play] }));
+        let (status, text) = self.send_text(rb)?;
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(format!("HTTP {status}: {}", short(&text)))
+        }
+    }
+
     /// Настройки «Моей волны» («По характеру», «Под настроение», «По языку»), выбранные в любом
     /// клиенте: seeds `setting…` последней волны, если это была «Моя волна».
-    fn wave_settings(&self) -> Vec<String> {
+    pub fn wave_settings(&self) -> Vec<String> {
         let v = match self.get("/rotor/wave/last", &[]) {
             Ok(v) => v,
             Err(e) => {
@@ -1394,16 +1563,55 @@ impl Api {
         }
     }
 
+    /// Подпись и название последней волны аккаунта («Моя волна под занятие», «В дороге»), если
+    /// это волна по `station`. Оригинал берёт их отсюда же (`getLastVibe`); станция — первый сид.
+    pub fn wave_title(&self, station: &str) -> Option<(String, String)> {
+        let v = match self.get("/rotor/wave/last", &[]) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::config::log(format!("rotor/wave/last: {e}"));
+                return None;
+            }
+        };
+        let name = str_of(&v, "name");
+        (v.pointer("/seeds/0").and_then(|s| s.as_str()) == Some(station) && !name.is_empty())
+            .then(|| (str_of(&v, "description"), name))
+    }
+
+    /// Какие настройки есть у «Моей волны»: названия, картинки и seeds приходят с сервера.
+    pub fn wave_setting_groups(&self) -> Res<Vec<WaveSettingGroup>> {
+        let v = self.get("/rotor/wave/settings", &[])?;
+        let all = v.get("settingRestrictions").ok_or("нет settingRestrictions")?;
+        let groups = ["diversity", "moodEnergy", "language"]
+            .iter()
+            .filter_map(|key| all.get(*key))
+            .map(|g| WaveSettingGroup {
+                name: str_of(g, "name"),
+                options: g
+                    .get("possibleValues")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().map(|o| WaveSettingOption {
+                        name: str_of(o, "name"),
+                        seed: str_of(o, "serializedSeed"),
+                        image: o.get("imageUrl").and_then(|u| u.as_str()).map(String::from),
+                        any: o.get("unspecified").and_then(|u| u.as_bool()).unwrap_or(false),
+                    }).collect())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        Ok(groups)
+    }
+
     /// Отправить фидбек сессии (тело из [`session_event`]).
     pub fn session_feedback(&self, session: &str, body: &Value) -> Res<()> {
         self.session_req(&format!("/rotor/session/{session}/feedback/"), body).map(|_| ())
     }
 
     /// Фидбек станции: radioStarted / trackStarted / trackFinished / skip.
-    pub fn feedback(&self, station: &str, kind: &str, track: Option<&str>, played: Option<f64>, batch_id: &str) -> Res<()> {
+    pub fn feedback(&self, station: &str, kind: &str, track: Option<&str>, played: Option<f64>, batch_id: &str, from: &str) -> Res<()> {
         let mut body = json!({ "type": kind, "timestamp": now().as_secs_f64() });
         if kind == "radioStarted" {
-            body["from"] = json!(format!("desktop_win-radio-{}-default", station.replace(':', "-")));
+            body["from"] = json!(from);
         }
         if let Some(t) = track {
             body["trackId"] = json!(t);
@@ -1462,6 +1670,20 @@ impl Api {
         })
     }
 
+    /// «Знакомое вам» у исполнителя: сначала треки из коллекции, потом слышанные в Моей волне.
+    pub fn artist_familiar(&self, id: &str) -> Res<Vec<Track>> {
+        let v = self.get_raw(&format!("/artists/{id}/familiar-you?waveTracksLimit=100&collectionTracksLimit=100&collectionAlbumsLimit=20"))?;
+        let mut seen = std::collections::HashSet::new();
+        let tracks = ["/collection/tracks", "/wave/tracks"]
+            .iter()
+            .filter_map(|p| v.pointer(p).and_then(|t| t.as_array()))
+            .flatten()
+            .filter_map(|x| parse_track(x.get("track").unwrap_or(x)))
+            .filter(|t| seen.insert(t.id.clone()))
+            .collect();
+        Ok(tracks)
+    }
+
     pub fn artist_tracks(&self, id: &str) -> Res<Vec<Track>> {
         artist_track_pages(|page| {
             self.get(&format!("/artists/{id}/tracks"), &[("page", &page.to_string()), ("page-size", "100")])
@@ -1501,6 +1723,15 @@ impl Api {
         Ok(v.as_array().map(|a| a.iter().filter_map(parse_playlist).collect()).unwrap_or_default())
     }
 
+    /// Какие из плейлистов `kinds` уже содержат трек: так оригинал ставит галочки в меню.
+    pub fn playlists_with_track(&self, uid: &str, kinds: &[String], track_id: &str) -> Res<Vec<String>> {
+        let v = self.get(&format!("/users/{uid}/playlists"), &[("kinds", kinds.join(",").as_str()), ("rich-tracks", "false")])?;
+        let has = |p: &&Value| {
+            p.get("tracks").and_then(Value::as_array).is_some_and(|ts| ts.iter().any(|t| s(t.get("id")).as_deref() == Some(track_id)))
+        };
+        Ok(v.as_array().map(|a| a.iter().filter(has).filter_map(|p| s(p.get("kind"))).collect()).unwrap_or_default())
+    }
+
     pub fn create_playlist(&self, uid: &str, title: &str) -> Res<Playlist> {
         let v = self.send(
             self.req(Method::POST, &format!("/users/{uid}/playlists/create"))
@@ -1509,7 +1740,7 @@ impl Api {
         parse_playlist(&v).ok_or_else(|| "Яндекс не вернул новый плейлист".into())
     }
 
-    /// Добавляет треки в начало плейлиста одним запросом, порядок сохраняется.
+    /// Добавляет треки в начало плейлиста или в конец (`ADD_TO_END`) одним запросом.
     /// Ревизию берём свежую, иначе API отвечает 412.
     pub fn add_to_playlist(&self, uid: &str, kind: &str, tracks: &[Track]) -> Res<()> {
         let v = self.get(&format!("/users/{uid}/playlists/{kind}"), &[])?;
@@ -1524,7 +1755,12 @@ impl Api {
                 item
             })
             .collect();
-        let diff = json!([{ "op": "insert", "at": 0, "tracks": items }]).to_string();
+        let at = if ADD_TO_END.load(std::sync::atomic::Ordering::Relaxed) {
+            v.get("trackCount").and_then(|n| n.as_u64()).unwrap_or(0)
+        } else {
+            0
+        };
+        let diff = json!([{ "op": "insert", "at": at, "tracks": items }]).to_string();
         self.send(
             self.req(Method::POST, &format!("/users/{uid}/playlists/{kind}/change-relative"))
                 .form(&[("kind", kind), ("revision", revision.as_str()), ("diff", diff.as_str())]),
@@ -1533,12 +1769,12 @@ impl Api {
     }
 
     /// Индекс и ревизия должны относиться к одному снимку плейлиста.
-    pub fn remove_from_playlist(&self, uid: &str, kind: &str, t: &Track) -> Res<()> {
+    pub fn remove_from_playlist(&self, uid: &str, kind: &str, t: &Track, first_match: bool) -> Res<()> {
         let v = self.get(&format!("/users/{uid}/playlists/{kind}"), &[])?;
         let revision = v.get("revision").and_then(Value::as_u64).ok_or("нет ревизии плейлиста")?.to_string();
-        let at = playlist_remove_index(&v, t)?;
+        let at = playlist_remove_index(&v, t, first_match)?;
         let mut item = json!({ "id": t.id });
-        if let Some(a) = t.playlist_slot.as_ref().and_then(|slot| slot.album.as_ref()).or(t.album_id.as_ref()) {
+        if let Some(a) = s(v.pointer(&format!("/tracks/{at}/albumId"))).or_else(|| t.album_id.clone()) {
             item["albumId"] = json!(a);
         }
         let diff = json!([{ "op": "delete", "from": at, "to": at + 1, "tracks": [item] }]).to_string();
@@ -1612,17 +1848,25 @@ impl Api {
 
     // ---------- аудио ----------
 
-    /// Прямая ссылка на аудио: сначала download-info (mp3 до 320), потом get-file-info.
-    pub fn stream_url(&self, track_id: &str) -> Res<String> {
+    /// Прямая ссылка на аудио и его формат («MP3 320»): сначала download-info (mp3 до 320),
+    /// потом get-file-info.
+    pub fn stream_url(&self, track_id: &str) -> Res<(String, String)> {
         match self.stream_url_legacy(track_id) {
             Ok(u) => Ok(u),
             Err(e1) => self
-                .stream_url_file_info(track_id)
+                .file_info(track_id, "nq", "mp3,aac,he-aac")
+                .map(|(codec, u)| (u, codec.replace("he-", "HE-").to_uppercase()))
                 .map_err(|e2| format!("download-info: {e1}; get-file-info: {e2}")),
         }
     }
 
-    fn stream_url_legacy(&self, track_id: &str) -> Res<String> {
+    /// Lossless без шифрования есть только как FLAC в MP4. None — у трека нет FLAC.
+    pub fn flac_url(&self, track_id: &str) -> Res<Option<String>> {
+        let (codec, url) = self.file_info(track_id, "lossless", "flac-mp4,flac")?;
+        Ok(codec.starts_with("flac").then_some(url))
+    }
+
+    fn stream_url_legacy(&self, track_id: &str) -> Res<(String, String)> {
         let v = self.get(&format!("/tracks/{track_id}/download-info"), &[])?;
         let arr = v.as_array().ok_or("пустой download-info")?;
         let key = |x: &&Value| {
@@ -1631,7 +1875,7 @@ impl Api {
                 x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0),
             )
         };
-let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == Some("mp3"));
+        let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == Some("mp3"));
         let full = |x: &&Value| !x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false);
         let bitrate = |x: &&Value| x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0);
         let pick = match QUALITY.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1642,6 +1886,11 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
         .or_else(|| mp3().max_by_key(key))
         .or_else(|| arr.iter().max_by_key(key))
         .ok_or("нет вариантов загрузки")?;
+        let codec = pick.get("codec").and_then(|c| c.as_str()).unwrap_or("mp3").to_uppercase();
+        let format = match bitrate(&pick) {
+            0 => codec,
+            kbps => format!("{codec} {kbps}"),
+        };
         let info_url = pick.get("downloadInfoUrl").and_then(|u| u.as_str()).ok_or("нет downloadInfoUrl")?;
         if !reqwest::Url::parse(info_url).is_ok_and(|u| token_allowed(&u)) {
             return Err("download-info: адрес не на сервере Яндекса".into());
@@ -1656,12 +1905,13 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
         let sg = xml_tag(&xml, "s")?;
         let digest = Md5::digest(format!("{MP3_SALT}{}{sg}", path.get(1..).unwrap_or("")).as_bytes());
         let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        Ok(format!("https://{host}/get-mp3/{hash}/{ts}{path}"))
+        Ok((format!("https://{host}/get-mp3/{hash}/{ts}{path}"), format))
     }
 
-    fn stream_url_file_info(&self, track_id: &str) -> Res<String> {
+    /// Кодек и ссылка из get-file-info.
+    fn file_info(&self, track_id: &str, quality: &str, codecs: &str) -> Res<(String, String)> {
         let ts = now().as_secs().to_string();
-        let (quality, codecs, transports) = ("nq", "mp3,aac,he-aac", "raw");
+        let transports = "raw";
         let mut sg = sign(&format!("{ts}{track_id}{quality}{codecs}{transports}").replace(',', ""))?;
         sg.pop();
         let v = self.get(
@@ -1676,11 +1926,12 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
             ],
         )?;
         let di = v.get("downloadInfo").ok_or("нет downloadInfo")?;
-        di.get("url")
+        let url = di
+            .get("url")
             .and_then(|u| u.as_str())
             .or_else(|| di.get("urls")?.get(0)?.as_str())
-            .map(String::from)
-            .ok_or_else(|| "нет url в downloadInfo".into())
+            .ok_or("нет url в downloadInfo")?;
+        Ok((str_of(di, "codec"), url.to_string()))
     }
 
     pub(crate) fn matches_saved_audio(&self, url: &str, file: &mut std::fs::File) -> std::io::Result<bool> {
@@ -1708,6 +1959,24 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
     }
 
     /// Скачать файл целиком (аудио, обложка). Ссылки уже подписаны — без токена.
+    /// Ответ без чтения тела: трек дальше качается по кусочкам.
+    /// Аудио с байта `from`. Соединение живёт не дольше `STREAM_TIMEOUT`: зависшее
+    /// загрузчик переоткроет с того места, где оборвалось.
+    pub fn open_from(&self, url: &str, from: u64) -> Res<reqwest::blocking::Response> {
+        let mut req = self.http.get(url).timeout(STREAM_TIMEOUT);
+        if from > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={from}-"));
+        }
+        let resp = req.send().map_err(|e| format!("сеть: {}", crate::config::chain(&e)))?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        if from > 0 && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err("сервер не отдаёт файл с середины".into());
+        }
+        Ok(resp)
+    }
+
     pub fn fetch_bytes(&self, url: &str) -> Res<Vec<u8>> {
         let resp = self.http.get(url).send().map_err(|e| format!("сеть: {}", crate::config::chain(&e)))?;
         if !resp.status().is_success() {

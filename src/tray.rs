@@ -17,6 +17,7 @@ const CLASS: &str = "yamusic_rs_tray";
 const WM_TRAY: u32 = WM_APP + 1;
 /// Второй запуск просит уже работающий экземпляр показать окно.
 const WM_WAKE: u32 = WM_APP + 2;
+
 /// Медиаклавиши клавиатуры: id горячей клавиши и код клавиши.
 const MEDIA_KEYS: [(i32, u16); 3] = [(1, VK_MEDIA_PLAY_PAUSE), (2, VK_MEDIA_NEXT_TRACK), (3, VK_MEDIA_PREV_TRACK)];
 
@@ -27,6 +28,7 @@ pub enum Event {
     PlayPause,
     Play,
     Pause,
+    Seek(i64),
     Prev,
     Next,
     Updates,
@@ -270,10 +272,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
-        WM_WAKE => {
-            emit(Event::Show);
-            0
-        }
         WM_HOTKEY => {
             match wp {
                 1 => emit(Event::PlayPause),
@@ -281,6 +279,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 3 => emit(Event::Prev),
                 _ => {}
             }
+            0
+        }
+        WM_WAKE => {
+            emit(Event::Show);
             0
         }
         _ => {

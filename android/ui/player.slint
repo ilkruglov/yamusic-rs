@@ -1,0 +1,894 @@
+// Полный плеер, как в мобильном клиенте: обложка или текст, кнопки, исполнитель, похожие
+// треки, плейлисты, таймер и звук. Координаты в dp сняты с оригинала на экране 411 dp.
+
+import { Now, IconButton, SkipIcon, DeviceIcon, CollapseIcon, Cover, TrackRow, T } from "common.slint";
+
+/// Кнопка 72×48 под плеером: повтор, текст, таймер, звук.
+component PillButton inherits Rectangle {
+    in property <image> icon;
+    in property <length> icon-size: 40px;
+    in property <bool> active;
+    in property <bool> dim;
+    callback clicked();
+    width: 72px;
+    height: 48px;
+    border-radius: 24px;
+    background: #ffffff14;
+    border-width: root.active ? 2px : 0;
+    border-color: #ffffffe6;
+    Image {
+        source: root.icon;
+        width: root.icon-size;
+        height: root.icon-size;
+        colorize: root.dim ? #ffffff40 : #ffffffcc;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+/// Строки текста песни: поющаяся держится на высоте `anchor`, остальные тусклые.
+component LyricsLines inherits Rectangle {
+    in property <length> font-size;
+    in property <length> anchor;
+    in property <length> gap;
+    // Спетые строки: в окошке на месте обложки их не видно, на весь экран — тусклые.
+    in property <bool> show-past: true;
+    property <length> target;
+    clip: true;
+    lines := VerticalLayout {
+        y: root.anchor - root.target;
+        animate y {
+            duration: 450ms;
+            easing: ease-in-out;
+        }
+        width: root.width;
+        height: self.preferred-height;
+        alignment: start;
+        spacing: root.gap;
+        for line[i] in Now.lyrics: Text {
+            property <bool> active: i == Now.lyric;
+            text: line;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+            font-family: "YS Music Headline";
+            font-weight: 700;
+            font-size: root.font-size;
+            color: Now.lyric < 0 || self.active ? #fff : i < Now.lyric && !root.show-past ? #ffffff00 : #ffffff40;
+            animate color { duration: 300ms; }
+            init => {
+                if self.active {
+                    root.target = self.y;
+                }
+            }
+            changed active => {
+                if self.active {
+                    root.target = self.y;
+                }
+            }
+        }
+    }
+}
+
+/// Плашка внизу: обложка, название, лайк и пауза, полоса прогресса фоном.
+export component MiniPlayer inherits Rectangle {
+    callback clicked();
+    height: 56px;
+    border-radius: 16px;
+    clip: true;
+    background: #ffffff1f;
+    Rectangle {
+        x: 0;
+        width: parent.width * clamp(Now.progress, 0, 1);
+        background: #ffffff1a;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Cover {
+        x: 8px;
+        y: 8px;
+        width: 40px;
+        height: 40px;
+        source: Now.cover;
+    }
+    Text {
+        x: 56px;
+        y: 8.8px;
+        width: parent.width - 56px - 96px;
+        text: Now.title;
+        color: #fff;
+        font-size: 17px;
+        font-weight: 500;
+        overflow: elide;
+    }
+    Text {
+        x: 56px;
+        y: 30.9px;
+        width: parent.width - 56px - 96px;
+        text: Now.artists;
+        color: #ffffff80;
+        font-size: 14px;
+        overflow: elide;
+    }
+    IconButton {
+        x: parent.width - 90px;
+        y: 4px;
+        width: 44px;
+        icon: Now.liked ? Now.icons.liked : Now.icons.like;
+        tint: Now.liked ? #ff0 : #fff;
+        clicked => { Now.like(); }
+    }
+    IconButton {
+        x: parent.width - 48px;
+        y: 4px;
+        icon: Now.playing ? Now.icons.pause : Now.icons.play;
+        icon-size: 28px;
+        clicked => { Now.play-pause(); }
+    }
+}
+
+export component Player inherits Rectangle {
+    in-out property <bool> open;
+    in-out property <bool> lyrics-full;
+    in-out property <bool> queue-open;
+    // Насколько плеер утянули вниз и тянут ли сейчас.
+    in property <length> drag;
+    in property <bool> dragging;
+    // Лента в самом верху: свайп вниз сворачивает плеер, а не листает.
+    out property <bool> at-top: flick.content-y >= 0 && !root.lyrics-full && !root.queue-open;
+    callback open-menu();
+    callback open-timer();
+    callback open-quality();
+
+    /// Пролистать к «Добавить в плейлист».
+    public function show-playlists() {
+        flick.content-y = min(0, -(root.playlists-y - 100px));
+    }
+
+    // Ширина обложки и низ обложки: от него отсчитано всё, что ниже.
+    property <length> side: 28px;
+    property <bool> split: root.width >= 640px && root.width > root.height;
+    property <length> body-width: min(root.width, root.split ? 1040px : 600px);
+    property <length> w: root.body-width - 2 * root.side;
+    property <length> art-y: root.split ? 80px : 124px;
+    property <length> art-size: root.split ? min(420px, root.body-width * 0.42, max(144px, root.height - 104px)) : root.w;
+    property <length> controls-y: root.split ? max(root.art-y, root.art-y + (root.art-size - 300px) / 2) : root.art-y + root.art-size;
+    property <length> base: root.split ? max(root.controls-y, root.art-y + root.art-size - 298px) : root.controls-y;
+    property <length> header-y: root.split ? 20px : T.top;
+    property <length> queue-y: root.header-y + 48px;
+    property <length> lyrics-width: min(root.width - 48px, 720px);
+    property <length> lyrics-y: root.split ? 76px : 112px;
+    property <length> card-y: root.base + 423px;
+    property <length> card-h: 422px;
+    property <length> similar-y: root.card-y + (Now.artist-cards.length > 0 ? root.card-h + 32px : 0);
+    property <length> playlists-y: root.similar-y + (Now.similar.length > 0 ? 64.4px + Now.similar.length * 76.6px + 21px : 0);
+    property <length> buttons-y: root.playlists-y + (Now.playlists.length > 0 ? 74.3px + Now.playlists.length * 96px + 3px : 0);
+    // Плеер уехал вверх вместе с кнопками: внизу появляется плашка.
+    property <bool> mini: flick.content-y < -(root.base + 210px);
+
+    y: root.open ? root.drag : root.height;
+    animate y {
+        duration: root.dragging ? 0ms : 300ms;
+        easing: ease-out;
+    }
+    visible: self.y < root.height - 1px;
+    background: Now.bg;
+    TouchArea { }
+
+    flick := Flickable {
+        width: root.width;
+        height: root.height;
+        content-width: self.width;
+        content-height: root.buttons-y + 48px + 140px;
+
+        body := Rectangle {
+            x: (flick.width - self.width) / 2;
+            y: 0px;
+            width: root.body-width;
+            height: flick.content-height;
+
+            // Обложку листают вбок: влево следующий трек, вправо предыдущий.
+            if !Now.lyrics-mode || !Now.has-lyrics: flip := SwipeGestureHandler {
+                property <length> shift: self.swiping ? self.current-position.x - self.pressed-position.x : 0px;
+                x: root.side;
+                y: root.art-y;
+                width: root.art-size;
+                height: root.art-size;
+                handle-swipe-left: true;
+                handle-swipe-right: true;
+                swiped => {
+                    if self.current-position.x - self.pressed-position.x < -80px {
+                        Now.next();
+                    } else if self.current-position.x - self.pressed-position.x > 80px {
+                        Now.prev();
+                    }
+                }
+                Cover {
+                    x: flip.shift;
+                    animate x { duration: flip.swiping ? 0ms : 200ms; }
+                    opacity: 1 - min(0.6, abs(flip.shift) / root.art-size);
+                    source: Now.cover-big;
+                    radius: 12px;
+                }
+            }
+            if Now.lyrics-mode && Now.has-lyrics: Rectangle {
+                x: root.side;
+                y: root.art-y;
+                width: root.art-size;
+                height: root.art-size;
+                border-radius: 12px;
+                background: #ffffff14;
+                clip: true;
+                LyricsLines {
+                    x: 24px;
+                    width: parent.width - 48px;
+                    anchor: 40px;
+                    show-past: false;
+                    font-size: 32px;
+                    gap: 24px;
+                }
+                TouchArea {
+                    clicked => { root.lyrics-full = true; }
+                }
+                IconButton {
+                    x: parent.width - 52px;
+                    y: 4px;
+                    icon: Now.icons.fullscreen;
+                    tint: #ffffffb3;
+                    clicked => { root.lyrics-full = true; }
+                }
+            }
+
+            controls := Rectangle {
+                x: root.split ? root.art-size + root.side + 12px : 0px;
+                y: root.controls-y;
+                width: body.width - self.x;
+                height: 300px;
+                Cover {
+                    x: 28.2px;
+                    y: 24.2px;
+                    width: 52px;
+                    height: 52px;
+                    radius: 26px;
+                    source: Now.avatar;
+                }
+                TouchArea {
+                    x: 28.2px;
+                    y: 24.2px;
+                    width: 52px;
+                    height: 52px;
+                    clicked => {
+                        root.open = false;
+                        Now.open-artist(-1);
+                    }
+                }
+                TouchArea {
+                    x: 92.2px;
+                    y: 25px;
+                    width: controls.width - 92.2px - 111.8px;
+                    height: 26px;
+                    clicked => {
+                        root.open = false;
+                        Now.open-album();
+                    }
+                }
+                TouchArea {
+                    x: 92.2px;
+                    y: 51px;
+                    width: controls.width - 92.2px - 111.8px;
+                    height: 24px;
+                    clicked => {
+                        root.open = false;
+                        Now.open-artist(-1);
+                    }
+                }
+                HorizontalLayout {
+                    x: 92.2px;
+                    y: 25px;
+                    width: controls.width - 92.2px - 111.8px;
+                    height: 30px;
+                    alignment: start;
+                    spacing: 6px;
+                    Text {
+                        text: Now.version == "" ? Now.title : Now.title + " (" + Now.version + ")";
+                        color: #fff;
+                        font-size: 21px;
+                        font-weight: 700;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    if Now.explicit: Image {
+                        y: 7px;
+                        width: 16px;
+                        height: 16px;
+                        source: Now.icons.explicit;
+                        colorize: #ffffffcc;
+                    }
+                }
+                Text {
+                    x: 92.2px;
+                    y: 51px;
+                    width: controls.width - 92.2px - 111.8px;
+                    text: Now.artists;
+                    color: #ffffff80;
+                    font-size: 17px;
+                    overflow: elide;
+                }
+                IconButton {
+                    x: controls.width - 99.8px - 12px;
+                    y: 26.3px;
+                    icon: Now.icons.share;
+                    tint: #ffffffe6;
+                    clicked => { Now.share(); }
+                }
+                IconButton {
+                    x: controls.width - 51.8px - 12px;
+                    y: 26.3px;
+                    icon: Now.icons.more;
+                    tint: #ffffffe6;
+                    clicked => { root.open-menu(); }
+                }
+
+                // Перемотка: тонкая полоса, кружок на позиции, время по краям.
+                seek := TouchArea {
+                    property <float> drag: clamp(self.mouse-x / self.width, 0, 1);
+                    property <float> shown: self.pressed ? self.drag : Now.progress;
+                    x: root.side;
+                    y: 88px;
+                    width: controls.width - 2 * root.side;
+                    height: 40px;
+                    Rectangle {
+                        y: 15.4px;
+                        height: 1.6px;
+                        border-radius: 0.8px;
+                        background: #ffffff33;
+                    }
+                    Rectangle {
+                        x: 0;
+                        y: 15.4px;
+                        width: parent.width * seek.shown;
+                        height: 1.6px;
+                        background: #fff;
+                    }
+                    Rectangle {
+                        x: parent.width * seek.shown - self.width / 2;
+                        y: 16.2px - self.height / 2;
+                        width: seek.pressed ? 14px : 10px;
+                        height: self.width;
+                        border-radius: self.width / 2;
+                        background: #fff;
+                    }
+                    pointer-event(e) => {
+                        if e.kind == PointerEventKind.up {
+                            Now.seek(self.drag);
+                        }
+                    }
+                }
+                Text {
+                    x: root.side;
+                    y: 109.9px;
+                    text: Now.position-text;
+                    color: #ffffff80;
+                    font-size: 14px;
+                }
+                Text {
+                    x: controls.width - root.side - self.width;
+                    y: 109.9px;
+                    text: Now.duration-text;
+                    color: #ffffff80;
+                    font-size: 14px;
+                }
+
+                IconButton {
+                    x: 16.8px;
+                    y: 150.7px;
+                    icon: Now.icons.dislike;
+                    tint: #ffffffcc;
+                    clicked => { Now.dislike(); }
+                }
+                TouchArea {
+                    x: controls.width / 2 - 83.8px - 12px;
+                    y: 150.7px;
+                    width: 48px;
+                    height: 48px;
+                    SkipIcon {
+                        width: 30px;
+                        height: 30px;
+                    }
+                    clicked => { Now.prev(); }
+                }
+                Rectangle {
+                    x: (controls.width - 64px) / 2;
+                    y: 142.3px;
+                    width: 64px;
+                    height: 64px;
+                    border-radius: 32px;
+                    background: play-ta.pressed ? #e6e600 : #ff0;
+                    Image {
+                        source: Now.playing ? Now.icons.pause : Now.icons.play;
+                        width: 32px;
+                        height: 32px;
+                        colorize: #000;
+                    }
+                    play-ta := TouchArea {
+                        clicked => { Now.play-pause(); }
+                    }
+                }
+                TouchArea {
+                    x: controls.width / 2 + 60.2px - 12px;
+                    y: 150.7px;
+                    width: 48px;
+                    height: 48px;
+                    SkipIcon {
+                        width: 30px;
+                        height: 30px;
+                        forward: true;
+                    }
+                    clicked => { Now.next(); }
+                }
+                IconButton {
+                    x: controls.width - 63.6px;
+                    y: 150.7px;
+                    icon: Now.liked ? Now.icons.liked : Now.icons.like;
+                    tint: Now.liked ? #ff0 : #ffffffcc;
+                    clicked => { Now.like(); }
+                }
+
+                PillButton {
+                    x: root.side;
+                    y: 246.3px;
+                    icon: Now.repeat == 2 ? Now.icons.repeat-one : Now.icons.repeat;
+                    active: Now.repeat != 0;
+                    clicked => { Now.toggle-repeat(); }
+                }
+                PillButton {
+                    x: (controls.width - 72px) / 2;
+                    y: 246.3px;
+                    icon: Now.icons.lyrics;
+                    dim: !Now.has-lyrics;
+                    active: Now.has-lyrics && Now.lyrics-mode;
+                    clicked => {
+                        if Now.has-lyrics {
+                            Now.lyrics-mode = !Now.lyrics-mode;
+                        }
+                    }
+                }
+                PillButton {
+                    x: controls.width - root.side - 72px;
+                    y: 246.3px;
+                    icon: Now.icons.download;
+                    icon-size: 24px;
+                    clicked => { Now.download(); }
+                }
+            }
+
+            // «Моя волна по треку»: серая плашка с волной.
+            Rectangle {
+                x: root.side;
+                y: root.base + 326.3px;
+                width: root.w;
+                height: 64.8px;
+                border-radius: 16px;
+                clip: true;
+                background: @linear-gradient(170deg, #ffffff40 0%, #ffffff1f 45%, #ffffff47 100%);
+                Rectangle {
+                    x: parent.width * 0.55;
+                    y: 22px;
+                    width: parent.width * 0.6;
+                    height: 60px;
+                    border-radius: 30px;
+                    background: @radial-gradient(circle, #ffffff40 0%, #ffffff00 70%);
+                }
+                Text {
+                    y: 10px;
+                    width: parent.width;
+                    text: "Моя волна по треку";
+                    color: #ffffffb3;
+                    font-size: 15px;
+                    font-weight: 500;
+                    horizontal-alignment: center;
+                }
+                HorizontalLayout {
+                    y: 27px;
+                    height: 30px;
+                    alignment: center;
+                    spacing: 4px;
+                    Image {
+                        y: 4px;
+                        width: 22px;
+                        height: 22px;
+                        source: Now.icons.play-small;
+                        colorize: #fff;
+                    }
+                    Text {
+                        text: Now.title;
+                        color: #fff;
+                        font-family: "YS Music Headline";
+                        font-weight: 700;
+                        font-size: 24px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                }
+                TouchArea {
+                    clicked => { Now.track-wave(); }
+                }
+            }
+
+            // Исполнители: по карточке на каждого, листаются вбок.
+            Flickable {
+                y: root.card-y;
+                width: body.width;
+                height: Now.artist-cards.length > 0 ? root.card-h : 0;
+                content-width: max(self.width, Now.artist-cards.length * (root.w + 8px) + 2 * root.side - 8px);
+                content-height: self.height;
+                for card[i] in Now.artist-cards: Rectangle {
+                    x: root.side + i * (root.w + 8px);
+                    width: root.w;
+                    height: root.card-h;
+                    border-radius: 16px;
+                    clip: true;
+                    background: card.color;
+                    Image {
+                        y: 0;
+                        width: parent.width;
+                        height: parent.width;
+                        source: card.photo;
+                        image-fit: cover;
+                    }
+                    TouchArea {
+                        clicked => {
+                            root.open = false;
+                            Now.open-artist(i);
+                        }
+                    }
+                    Rectangle {
+                        y: parent.width * 0.4;
+                        height: parent.width * 0.6 + 1px;
+                        background: @linear-gradient(180deg, card.color.transparentize(1) 0%, card.color 100%);
+                    }
+                    Text {
+                        x: 16px;
+                        y: 345px;
+                        width: parent.width - 96px;
+                        text: card.name;
+                        color: #fff;
+                        font-family: "YS Music Headline";
+                        font-weight: 700;
+                        font-size: 31px;
+                        overflow: elide;
+                    }
+                    if card.listeners != "": HorizontalLayout {
+                        x: 16px;
+                        y: 388px;
+                        height: 20px;
+                        spacing: 6px;
+                        Image {
+                            y: 2px;
+                            width: 16px;
+                            height: 16px;
+                            source: Now.icons.listeners;
+                            colorize: #fff;
+                        }
+                        Text {
+                            text: card.listeners;
+                            color: #fff;
+                            font-size: 15px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        x: parent.width - 64px;
+                        y: 353px;
+                        width: 48px;
+                        height: 48px;
+                        border-radius: 24px;
+                        background: #ffffff26;
+                        Image {
+                            width: 24px;
+                            height: 24px;
+                            source: card.liked ? Now.icons.liked : Now.icons.like;
+                            colorize: card.liked ? #ff0 : #fff;
+                        }
+                        TouchArea {
+                            clicked => { Now.like-artist(i); }
+                        }
+                    }
+                }
+            }
+
+            if Now.similar.length > 0: HorizontalLayout {
+                x: root.side;
+                y: root.similar-y;
+                height: 29.3px;
+                spacing: 6px;
+                Text {
+                    text: "Похожие треки";
+                    color: #fff;
+                    font-family: "YS Music Headline";
+                    font-weight: 700;
+                    font-size: 24px;
+                    vertical-alignment: center;
+                }
+                Image {
+                    y: 4.6px;
+                    width: 20px;
+                    height: 20px;
+                    source: Now.icons.arrow-right;
+                    colorize: #fff;
+                }
+            }
+            for row[i] in Now.similar: TrackRow {
+                y: root.similar-y + 64.4px - 12.8px + i * 76.6px;
+                width: body.width;
+                item: row;
+                clicked => { Now.play-similar(i); }
+            }
+
+            if Now.playlists.length > 0: TouchArea {
+                x: root.side;
+                y: root.playlists-y;
+                width: 280px;
+                height: 29.3px;
+                clicked => {
+                    root.open = false;
+                    Now.open-playlists();
+                }
+            }
+            if Now.playlists.length > 0: HorizontalLayout {
+                x: root.side;
+                y: root.playlists-y;
+                height: 29.3px;
+                spacing: 6px;
+                Text {
+                    text: "Добавить в плейлист";
+                    color: #fff;
+                    font-family: "YS Music Headline";
+                    font-weight: 700;
+                    font-size: 24px;
+                    vertical-alignment: center;
+                }
+                Image {
+                    y: 4.6px;
+                    width: 20px;
+                    height: 20px;
+                    source: Now.icons.arrow-right;
+                    colorize: #fff;
+                }
+            }
+            for row[i] in Now.playlists: Rectangle {
+                y: root.playlists-y + 74.3px - 21px + i * 96px;
+                width: body.width;
+                height: 80px;
+                Cover {
+                    x: root.side;
+                    width: 80px;
+                    height: 80px;
+                    source: row.cover;
+                }
+                Text {
+                    x: 120.4px;
+                    y: 21px;
+                    width: 227px;
+                    text: row.title;
+                    color: #fff;
+                    font-size: 17px;
+                    font-weight: 500;
+                    overflow: elide;
+                }
+                Text {
+                    x: 120.4px;
+                    y: 43.1px;
+                    width: 227px;
+                    text: row.subtitle;
+                    color: #ffffff80;
+                    font-size: 14px;
+                }
+                IconButton {
+                    x: body.width - 63.6px;
+                    y: 16px;
+                    icon: Now.icons.add;
+                    tint: #ffffffe6;
+                    clicked => { Now.add-to-playlist(i); }
+                }
+            }
+
+            PillButton {
+                x: body.width / 2 - 107px;
+                y: root.buttons-y;
+                icon: Now.icons.timer;
+                icon-size: 24px;
+                active: Now.timer-on;
+                clicked => { root.open-timer(); }
+            }
+            PillButton {
+                x: body.width / 2 + 35.4px;
+                y: root.buttons-y;
+                icon: Now.icons.sound;
+                icon-size: 24px;
+                clicked => { root.open-quality(); }
+            }
+        }
+    }
+
+    if root.mini && !root.lyrics-full && !root.queue-open: MiniPlayer {
+        x: (root.width - self.width) / 2;
+        y: root.height - 102.9px;
+        width: min(root.width - 32px, 680px);
+        clicked => { flick.content-y = 0; }
+    }
+
+    // Текст песни на весь экран.
+    if root.lyrics-full: Rectangle {
+        background: Now.bg;
+        TouchArea { }
+        if Now.lyric >= 0: LyricsLines {
+            x: (root.width - self.width) / 2;
+            y: root.lyrics-y;
+            width: root.lyrics-width;
+            height: max(0px, root.height - self.y - 112px);
+            anchor: root.split ? 36px : 96px;
+            font-size: 36px;
+            gap: 32px;
+        }
+        if Now.lyric < 0: Flickable {
+            x: (root.width - self.width) / 2;
+            y: root.lyrics-y;
+            width: root.lyrics-width;
+            height: max(0px, root.height - self.y - 112px);
+            VerticalLayout {
+                alignment: start;
+                spacing: 16px;
+                padding-top: root.split ? 36px : 96px;
+                padding-bottom: 32px;
+                for line in Now.lyrics: Text {
+                    text: line;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    font-family: "YS Music Headline";
+                    font-weight: 700;
+                    font-size: 28px;
+                    color: #fff;
+                }
+            }
+        }
+        Rectangle {
+            x: root.width - 60px;
+            y: root.lyrics-y;
+            width: 48px;
+            height: 48px;
+            border-radius: 24px;
+            background: #ffffff1a;
+            CollapseIcon { }
+            TouchArea {
+                clicked => { root.lyrics-full = false; }
+            }
+        }
+        MiniPlayer {
+            x: (root.width - self.width) / 2;
+            y: root.height - 102.9px;
+            width: min(root.width - 32px, 680px);
+            clicked => { root.lyrics-full = false; }
+        }
+    }
+
+    // Очередь: текущий трек подсвечен, дальше — что заиграет.
+    if root.queue-open: Rectangle {
+        y: root.queue-y;
+        height: root.height - self.y;
+        background: Now.bg;
+        TouchArea { }
+        queue := Flickable {
+            x: (root.width - self.width) / 2;
+            width: min(root.width, 680px);
+            content-width: self.width;
+            content-height: (Now.queue.length + 1) * 84.5px + 60px;
+            Rectangle {
+                height: 76px;
+                background: #ffffff14;
+                Cover {
+                    x: 16px;
+                    y: 12px;
+                    width: 52px;
+                    height: 52px;
+                    source: Now.cover;
+                }
+                Text {
+                    x: 80.4px;
+                    y: 18.9px;
+                    width: queue.width - 80.4px - 56px;
+                    text: Now.title;
+                    color: #fff;
+                    font-size: 17px;
+                    font-weight: 500;
+                    overflow: elide;
+                }
+                Text {
+                    x: 80.4px;
+                    y: 41px;
+                    width: queue.width - 80.4px - 56px;
+                    text: Now.artists;
+                    color: #ffffff80;
+                    font-size: 14px;
+                    overflow: elide;
+                }
+            }
+            for row[i] in Now.queue: Rectangle {
+                y: (i + 1) * 84.5px;
+                height: 76px;
+                Cover {
+                    x: 16px;
+                    y: 12px;
+                    width: 52px;
+                    height: 52px;
+                    source: row.cover;
+                }
+                Text {
+                    x: 80.4px;
+                    y: 18.9px;
+                    width: queue.width - 80.4px - 56px;
+                    text: row.title;
+                    color: #fff;
+                    font-size: 17px;
+                    font-weight: 500;
+                    overflow: elide;
+                }
+                Text {
+                    x: 80.4px;
+                    y: 41px;
+                    width: queue.width - 80.4px - 56px;
+                    text: row.subtitle;
+                    color: #ffffff80;
+                    font-size: 14px;
+                    overflow: elide;
+                }
+                TouchArea {
+                    clicked => {
+                        Now.jump(i);
+                        root.queue-open = false;
+                    }
+                }
+            }
+        }
+    }
+
+    // Шапка остаётся на месте, лента едет под ней.
+    IconButton {
+        x: 0;
+        y: root.header-y;
+        icon: Now.icons.chevron-down;
+        tint: #ffffffe6;
+        clicked => {
+            if root.queue-open {
+                root.queue-open = false;
+            } else {
+                root.open = false;
+            }
+        }
+    }
+    Text {
+        y: root.header-y + 15px;
+        width: root.width;
+        text: Now.source;
+        color: #ffffffe6;
+        font-size: 14px;
+        font-weight: 500;
+        horizontal-alignment: center;
+    }
+    Rectangle {
+        x: 327.6px - 12px + root.width - 411.4px;
+        y: root.header-y;
+        width: 48px;
+        height: 48px;
+        DeviceIcon { }
+    }
+    IconButton {
+        x: root.width - 47.8px;
+        y: root.header-y;
+        icon: Now.icons.queue;
+        tint: #ffffffe6;
+        clicked => { root.queue-open = !root.queue-open; }
+    }
+}

@@ -1,8 +1,8 @@
 // «Моя волна»: колесо вайбов, кнопка запуска и фоновое пятно в цветах трека.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover } from "widgets.slint";
-import { T, App, WheelEntry } from "state.slint";
+import { Icons, Icon, HoverIcon, BarButton, Cover } from "widgets.slint";
+import { T, App, WheelEntry, WaveOption } from "state.slint";
 import { VolumePopup } from "popups.slint";
 
 component GlassButton inherits Rectangle {
@@ -10,17 +10,47 @@ component GlassButton inherits Rectangle {
     in property <length> icon-size: 24px;
     in property <bool> enabled: true;
     out property <bool> hovered: ta.has-hover;
+    in property <bool> highlight-icon: hovered;
     callback clicked;
     width: 48px;
     height: 48px;
+    property <bool> ripple;
+    property <length> ripple-x;
+    property <length> ripple-y;
+    property <float> spread: ripple ? 1 : 0;
+    animate spread { duration: root.ripple && App.motion ? 600ms : 0ms; easing: linear; }
     border-radius: self.height / 2;
-    background: ta.has-hover && enabled ? #ffffff24 : #ffffff14;
-    animate background { duration: App.motion ? Theme.duration-transition : 0ms; }
-    Icon { source: icon; size: icon-size; colorize: enabled ? (ta.has-hover ? #ffffffe6 : #ffffffb3) : #ffffff14; }
+    clip: true;
+    background: ta.has-hover && enabled ? #ffffff1a : #ffffff14;
+    animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+    if App.motion && spread > 0 && spread < 1: Rectangle {
+        width: root.width * 4 * root.spread;
+        height: self.width;
+        x: root.ripple-x - self.width / 2;
+        y: root.ripple-y - self.height / 2;
+        border-radius: self.width / 2;
+        background: #ffffff.with-alpha(0.09 * (1 - root.spread));
+    }
+    Icon {
+        source: root.icon;
+        size: root.icon-size;
+        colorize: !root.enabled ? #ffffff14 : root.highlight-icon ? #e6e6e6 : #ffffffb3;
+        animate colorize { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+    }
     ta := TouchArea {
-        enabled: enabled;
+        enabled: root.enabled;
         mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                root.ripple = false;
+            }
+        }
+        clicked => {
+            root.ripple-x = self.mouse-x;
+            root.ripple-y = self.mouse-y;
+            root.ripple = true;
+            root.clicked();
+        }
     }
 }
 
@@ -32,6 +62,8 @@ component WheelSlot inherits Rectangle {
     in property <length> wrap-x;
     in property <length> area-h;
     in property <length> area-w;
+    in property <length> pointer-x;
+    in property <length> pointer-y;
     callback clicked;
 
     property <float> t: abs(p) / 4;
@@ -44,7 +76,7 @@ component WheelSlot inherits Rectangle {
 
     x: wrap-x + 120px * (1 + cos(f * 1rad));
     y: yc - 40px;
-    width: 334px;
+    width: area-w - wrap-x;
     height: 80px;
     // Прозрачность раздаётся детям: opacity на слоте — слой на каждый слот в каждом кадре.
     property <float> alpha: max(0, edge) * (1 - 0.86 * s * s * (3 - 2 * s));
@@ -59,16 +91,21 @@ component WheelSlot inherits Rectangle {
         background: transparent;
         source: entry.cover;
         alpha: root.alpha;
-        if ta.has-hover: Rectangle {
-            width: 40px;
-            height: 40px;
-            Icon { source: Icons.play-filled; size: 40px; colorize: #ffffff.with-alpha(root.alpha); }
+        if !entry.control-accent: HoverIcon {
+            property <bool> hot: abs(root.p) < 2.5 && root.pointer-x >= 0px && root.pointer-x < root.width
+                && root.pointer-y >= 0px && root.pointer-y < root.height;
+            property <float> reveal: hot ? 1 : 0;
+            animate reveal { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+            visible: self.reveal > 0;
+            source: Icons.play-filled;
+            size: 40px;
+            zoomed: hot && abs(root.pointer-x - 40px) < 20px && abs(root.pointer-y - 40px) < 20px;
+            alpha: root.alpha * self.reveal;
         }
     }
     VerticalLayout {
         x: 96px;
-        // Как у оригинала: подпись тянется до края колеса, а не до фиксированных 202.
-        width: max(40px, root.area-w - root.x - 96px - 5px);
+        width: max(0px, root.width - self.x - 36px);
         alignment: center;
         spacing: 4px;
         if entry.description != "": Text {
@@ -82,10 +119,10 @@ component WheelSlot inherits Rectangle {
             text: entry.name;
             wrap: word-wrap;
             overflow: elide;
-            max-height: 40px;
+            max-height: entry.description != "" ? 60px : 80px;
             font-size: Theme.font-size-label-l;
             font-weight: 500;
-            color: #ffffff.with-alpha(root.alpha);
+            color: (entry.control-accent ? Theme.logo-color-primary-player : #fff).transparentize(1 - root.alpha);
         }
     }
     ta := TouchArea {
@@ -199,6 +236,127 @@ component ContextPill inherits Rectangle {
     }
 }
 
+component TuneChip inherits Rectangle {
+    in property <WaveOption> option;
+    callback clicked;
+    height: 36px;
+    border-radius: self.height / 2;
+    background: root.option.selected ? #ffffff : ta.has-hover ? #ffffff26 : #ffffff14;
+    HorizontalLayout {
+        padding-left: root.option.image.width > 0 ? 6px : 14px;
+        padding-right: 14px;
+        spacing: 8px;
+        if root.option.image.width > 0: Cover {
+            width: 24px;
+            height: 24px;
+            y: 6px;
+            radius: 12px;
+            source: root.option.image;
+        }
+        Text {
+            text: root.option.name;
+            vertical-alignment: center;
+            overflow: elide;
+            font-size: Theme.font-size-label-m;
+            font-weight: 500;
+            color: root.option.selected ? #000000 : #ffffffe6;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Кнопка «Настроить» под Play, как VibeBlock_settingsButton у оригинала.
+component TunePill inherits Rectangle {
+    callback clicked;
+    width: row.preferred-width;
+    height: 40px;
+    border-radius: self.height / 2;
+    background: ta.has-hover ? #ffffff26 : #ffffff14;
+    row := HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 16px;
+        spacing: 8px;
+        alignment: center;
+        Image {
+            y: 12px;
+            width: 16px;
+            height: 16px;
+            source: @image-url("../icons/tune.svg");
+            colorize: #ffffffe6;
+        }
+        Text {
+            text: T.t("Настроить");
+            vertical-alignment: center;
+            font-size: Theme.font-size-label-m;
+            font-weight: 500;
+            color: #ffffffe6;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Настройки «Моей волны»: по варианту из каждой группы, выбор сразу перезапускает волну.
+// Ширина 410, как у VibeSettings_popover; варианты по два в ряд.
+component WaveTune inherits Rectangle {
+    property <length> pad: 20px;
+    property <length> cell: (self.width - 2 * self.pad - 8px) / 2;
+    width: 410px;
+    height: 68px + self.groups-h;
+    property <length> groups-h: self.rows-before(App.wave-settings.length);
+    pure function rows-before(n: int) -> length {
+        // У групп разное число вариантов, поэтому высота считается по каждой.
+        (n > 0 ? self.group-h(0) : 0) + (n > 1 ? self.group-h(1) : 0) + (n > 2 ? self.group-h(2) : 0) + (n > 3 ? self.group-h(3) : 0)
+    }
+    pure function group-h(g: int) -> length {
+        28px + ceil(App.wave-settings[g].options.length / 2) * 44px + 12px
+    }
+    border-radius: 16px;
+    background: Theme.background-color-primary-enabled-popover;
+    border-width: 1px;
+    border-color: Theme.outline-color-primary-disabled;
+    drop-shadow-blur: 20px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: #0000007a;
+    TouchArea { }
+    Text {
+        x: root.pad;
+        y: 20px;
+        text: T.t("Настроить Мою волну");
+        font-family: "YS Music Headline";
+        font-size: Theme.font-size-headline-xs;
+        font-weight: 700;
+        color: Theme.controls-color-primary-text-enabled-variant;
+    }
+    for group[g] in App.wave-settings: Rectangle {
+        x: root.pad;
+        y: 64px + root.rows-before(g);
+        width: parent.width - 2 * root.pad;
+        height: root.group-h(g);
+        Text {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            text: group.name;
+            horizontal-alignment: left;
+            font-size: Theme.font-size-label-s;
+            color: Theme.controls-color-primary-text-enabled;
+        }
+        for option[o] in group.options: TuneChip {
+            x: mod(o, 2) * (root.cell + 8px);
+            y: 28px + floor(o / 2) * 44px;
+            width: root.cell;
+            option: option;
+            clicked => { App.tune-wave(g, o); }
+        }
+    }
+}
+
 export component WavePage inherits Rectangle {
     // Раскладка оригинала: колесо — левые 40%, справа мета с отступами 24 и 48.
     property <length> wheel-w: root.width * 0.4;
@@ -218,15 +376,19 @@ export component WavePage inherits Rectangle {
     property <float> drag-progress: -1;
     property <float> shown: drag-progress >= 0 ? drag-progress : progress;
 
-    // Пятно: картинка оригинала, перекрашенная под трек.
+    // Пятно: картинка оригинала, перекрашенная под трек. С движением медленно вращается,
+    // дышит и плывёт; периоды взаимно простые, чтобы рисунок не повторялся.
     Image {
-        x: cx - blob / 2;
-        y: 284px + db - blob / 2;
+        property <duration> tick: App.wave-motion ? animation-tick() : 0ms;
+        x: cx - blob / 2 + blob * 0.02 * sin(tick / 11s * 360deg);
+        y: 284px + db - blob / 2 + blob * 0.02 * cos(tick / 13s * 360deg);
         width: blob;
         height: blob;
         source: App.blob;
         image-fit: contain;
         opacity: 0.8;
+        transform-rotation: tick / 60s * 360deg;
+        transform-scale: 1 + 0.04 * sin(tick / 7s * 360deg);
     }
 
     // Колесо вайбов: бесконечная лента, крутится колёсиком мыши.
@@ -241,36 +403,38 @@ export component WavePage inherits Rectangle {
         property <int> per-view: max(4, min(9, floor(self.height / 106px)));
         property <length> slide-h: self.height / per-view;
         property <length> wrap-x: self.width - min(self.width * 0.8, 600px);
-        in-out property <float> offset: 0;
-        animate offset { duration: App.motion ? 220ms : 0ms; easing: ease-out; }
-        property <int> base: floor(offset);
-        property <float> frac: offset - base;
+        property <bool> centering;
+        property <float> offset: App.wheel-offset;
+        animate offset { duration: App.motion && wheel.centering ? Theme.duration-transition : 0ms; easing: ease; }
+        property <int> first: floor(offset) - ceil(per-view / 2);
+        property <int> slot-count: per-view + 3;
 
-        TouchArea {
-            scroll-event(e) => {
-                // Колёсико: 100 px оригинала на щелчок × чувствительность 0,3.
-                // Щелчок колёсика (60 px) — один слайд, как у Swiper оригинала.
-                wheel.offset = wheel.offset - e.delta-y / 60px;
-                accept
-            }
+        function move-to(target: float, center: bool) {
+            wheel.centering = center;
+            App.wheel-offset = target;
         }
 
-        if n > 0: Rectangle {
-            for k in 13: WheelSlot {
-                property <int> rel: k - 6;
-                property <int> idx: mod(mod(wheel.base + rel, wheel.n) + wheel.n, wheel.n);
+        wheel-input := TouchArea {
+            scroll-event(e) => {
+                // В Windows щелчок колёсика даёт 60 px в Slint и 30 px в оригинале (100 × 0,3).
+                wheel.move-to(wheel.offset - e.delta-y * 0.5 / wheel.slide-h, false);
+                accept
+            }
+            for k in (wheel.n > 0 ? wheel.slot-count : 0): WheelSlot {
+                // Меняем карточку, когда слот уже ушёл за край колеса.
+                property <int> ordinal: k + ceil((wheel.first - k) / wheel.slot-count) * wheel.slot-count;
+                property <int> idx: mod(mod(ordinal, wheel.n) + wheel.n, wheel.n);
                 entry: App.wheel[idx];
-                p: rel - wheel.frac;
+                p: ordinal - wheel.offset;
+                pointer-x: wheel-input.has-hover ? wheel-input.mouse-x - self.x : -1px;
+                pointer-y: wheel-input.mouse-y - self.y;
                 slide-h: wheel.slide-h;
                 wrap-x: wheel.wrap-x;
                 area-h: wheel.height;
                 area-w: wheel.width;
                 clicked => {
-                    if abs(self.p) >= 2.5 {
-                        wheel.offset = wheel.offset + self.p;
-                    } else {
-                        App.play-wheel(self.idx);
-                    }
+                    if abs(self.p) >= 2.5 { wheel.move-to(self.ordinal, true); }
+                    else { App.play-wheel(self.idx); }
                 }
             }
         }
@@ -309,20 +473,6 @@ export component WavePage inherits Rectangle {
         color: #ffffff;
     }
 
-    if !App.has-track: Rectangle {
-        x: cx - 32px;
-        y: 580px + dp;
-        width: 64px;
-        height: 64px;
-        border-radius: 32px;
-        background: idle-ta.has-hover ? Theme.controls-color-primary-default-hovered : #ffff00;
-        animate background { duration: App.motion ? 150ms : 0ms; }
-        Icon { source: App.can-pause ? Icons.pause-big : Icons.play-big; size: 32px; colorize: #000; }
-        idle-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-pause(); } }
-    }
-    if !App.has-track: Icon { x: cx - 76px - 12px; y: 600px + dp; source: Icons.prev; size: 24px; colorize: #ffffff14; }
-    if !App.has-track: Icon { x: cx - 76px + 140px; y: 600px + dp; source: Icons.next; size: 24px; colorize: #ffffff14; }
-
     // Исполнитель крупно: клик открывает его страницу.
     if App.has-track && !paused: FitTitle {
         x: text-x;
@@ -358,18 +508,19 @@ export component WavePage inherits Rectangle {
             height: 48px;
             property <bool> open: vol.hovered || vol-pop.hovered || bridge.has-hover;
             vol := GlassButton {
+                highlight-icon: self.hovered || vol-pop.hovered;
                 icon: App.volume <= 0 ? Icons.volume-off : Icons.volume;
                 clicked => { App.toggle-mute(); }
             }
             bridge := TouchArea {
-                y: -12px;
-                height: 12px;
+                y: -4px;
+                height: 4px;
                 visible: parent.open;
             }
             vol-pop := VolumePopup {
                 x: (parent.width - self.width) / 2;
-                y: -12px - self.height;
-                visible: parent.open;
+                y: -4px - self.height;
+                open: parent.open;
                 glass: true;
             }
         }
@@ -441,33 +592,53 @@ export component WavePage inherits Rectangle {
         }
     }
 
-    if App.has-track: HorizontalLayout {
+    HorizontalLayout {
         x: cx - 88px;
         y: 580px + dp;
         width: 176px;
         height: 64px;
         spacing: 32px;
-        Rectangle {
-            width: 24px;
-            Icon { source: Icons.prev; size: 24px; colorize: prev-ta.has-hover ? #ffffffe6 : #ffffff80; }
-            prev-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.prev(); } }
+        BarButton {
+            width: 24px; height: 24px; y: 20px;
+            icon: Icons.prev; enabled: App.can-prev; smooth-color: true;
+            clicked => { App.prev(); }
         }
         Rectangle {
             width: 64px;
             height: 64px;
             border-radius: 32px;
-            background: play-ta.has-hover ? Theme.controls-color-primary-default-hovered : #ffff00;
-            animate background { duration: App.motion ? 150ms : 0ms; }
-            Icon { source: App.can-pause ? Icons.pause-big : Icons.play-big; size: 32px; colorize: #000; }
+            background: App.can-pause ? #ffffff40 : Theme.logo-color-primary-player;
+            animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+            Icon {
+                source: App.can-pause ? Icons.pause-big : Icons.play-big;
+                size: 32px;
+                colorize: App.can-pause ? (play-ta.has-hover ? #e6e6e6 : #ffffff80) : #000;
+                animate colorize { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+            }
             play-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-pause(); } }
         }
-        Rectangle {
-            width: 24px;
-            Icon { source: Icons.next; size: 24px; colorize: next-ta.has-hover ? #ffffffe6 : #ffffff80; }
-            next-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.next(); } }
+        BarButton {
+            width: 24px; height: 24px; y: 20px;
+            icon: Icons.next; enabled: App.has-track; smooth-color: true;
+            clicked => { App.next(); }
         }
     }
 
+    // Настройки «Моей волны» — только у неё самой и пока она не играет, как у оригинала.
+    tune := TunePill {
+        x: cx - self.width / 2;
+        y: 664px + dp;
+        visible: !App.wave-context && (!App.has-track || paused);
+        clicked => { App.open-wave-settings(); }
+    }
+    if App.wave-settings-open: TouchArea {
+        clicked => { App.wave-settings-open = false; }
+    }
+    // Панель справа от кнопки; в узком окне прижимается к правому краю.
+    if App.wave-settings-open: WaveTune {
+        x: min(tune.x + tune.width + 12px, parent.width - self.width - 16px);
+        y: clamp(tune.y + tune.height - self.height, 16px, parent.height - self.height - 16px);
+    }
 
     // Версия в правом нижнем углу, как у официального приложения.
     Rectangle {

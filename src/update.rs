@@ -14,6 +14,8 @@ pub const POLL: Duration = Duration::from_secs(30 * 60);
 
 /// Имя exe в релизе.
 const ASSET: &str = concat!(env!("CARGO_PKG_NAME"), ".exe");
+/// APK в релизе. На Android «Обновить» ведёт прямо на него: браузер скачает и предложит установить.
+const APK: &str = "yamusic-rs-arm64-v8a.apk";
 
 /// Проверка включена в настройках («Проверять обновления»).
 pub static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -79,12 +81,17 @@ pub fn check() -> Result<Option<Release>, String> {
         let sha = a.get("digest")?.as_str()?.strip_prefix("sha256:")?.to_ascii_lowercase();
         Some((url, size, sha))
     });
+    let apk = v
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .filter(|_| cfg!(target_os = "android"))
+        .and_then(|assets| assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(APK)))
+        .and_then(|a| a.get("browser_download_url")?.as_str());
     Ok(Some(Release {
         version: tag.trim_start_matches('v').to_string(),
         // Страницу откроет браузер системы: адрес из ответа берём, только если это https.
-        page: v
-            .get("html_url")
-            .and_then(|u| u.as_str())
+        page: apk
+            .or_else(|| v.get("html_url").and_then(|u| u.as_str()))
             .and_then(crate::client::browser_url)
             .unwrap_or_else(|| env!("CARGO_PKG_REPOSITORY").to_string()),
         exe,

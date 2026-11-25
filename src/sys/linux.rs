@@ -42,6 +42,13 @@ pub fn prepare(w: &slint::Window) {
     }
 }
 
+/// Wayland не сообщает, что окно развернули из панели, и Slint считает его свёрнутым до сих пор:
+/// следующая просьба свернуть до winit уже не доходит. Поэтому сначала сбрасываем это состояние.
+pub fn minimize(w: &slint::Window) {
+    w.set_minimized(false);
+    w.set_minimized(true);
+}
+
 /// Wayland не даёт приложению забрать фокус без токена активации, там окно просто покажется.
 pub fn raise(w: &slint::Window) {
     w.set_minimized(false);

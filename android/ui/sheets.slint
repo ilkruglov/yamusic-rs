@@ -1,0 +1,677 @@
+// Шторки плеера на светлом фоне: меню трека, настройки звука, таймер сна.
+
+import { Now, Sheet, Cover, QualityOption, T } from "common.slint";
+import { Pages } from "pages.slint";
+
+component MenuItem inherits Rectangle {
+    in property <image> icon;
+    in property <string> text;
+    in property <bool> grey;
+    callback clicked();
+    height: 48px;
+    Image {
+        x: 22.4px;
+        width: 24px;
+        height: 24px;
+        source: root.icon;
+        colorize: root.grey ? T.fg.with-alpha(0.55) : T.fg.with-alpha(0.90);
+    }
+    Text {
+        x: 60px;
+        text: root.text;
+        color: root.grey ? T.fg.with-alpha(0.55) : T.fg.with-alpha(0.90);
+        font-size: 17px;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component RoundItem inherits Rectangle {
+    in property <image> icon;
+    in property <string> text;
+    in property <color> tint: T.fg.with-alpha(0.90);
+    callback clicked();
+    width: 96px;
+    height: 112px;
+    Rectangle {
+        x: 16px;
+        y: 0;
+        width: 64px;
+        height: 64px;
+        border-radius: 32px;
+        background: T.fg.with-alpha(0.06);
+        Image {
+            width: 28px;
+            height: 28px;
+            source: root.icon;
+            colorize: root.tint;
+        }
+    }
+    Text {
+        y: 76px;
+        width: parent.width;
+        text: root.text;
+        color: T.fg.with-alpha(0.90);
+        font-size: 15px;
+        horizontal-alignment: center;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+/// Меню «⋮» трека из списка.
+export component TrackSheet inherits Sheet {
+    open <=> Pages.menu-open;
+    panel-height: 676px;
+    Cover {
+        x: 16px;
+        y: 38.4px;
+        width: 80px;
+        height: 80px;
+        radius: 8px;
+        source: Pages.menu-track.cover;
+    }
+    Text {
+        x: 108px;
+        y: 55px;
+        width: parent.width - 124px;
+        text: Pages.menu-track.title;
+        color: T.fg;
+        font-size: 22px;
+        font-weight: 700;
+        overflow: elide;
+    }
+    Text {
+        x: 108px;
+        y: 84px;
+        width: parent.width - 124px;
+        text: Pages.menu-track.subtitle;
+        color: T.fg.with-alpha(0.55);
+        font-size: 15px;
+        overflow: elide;
+    }
+    Rectangle {
+        x: 16px;
+        y: 140px;
+        width: parent.width - 32px;
+        height: 64px;
+        border-radius: 16px;
+        clip: true;
+        background: @linear-gradient(170deg, #2b2626 0%, #110f0f 50%, #3a3535 100%);
+        Text {
+            y: 10px;
+            width: parent.width;
+            text: "Моя волна по треку";
+            color: #ffffffb3;
+            font-size: 15px;
+            font-weight: 500;
+            horizontal-alignment: center;
+        }
+        HorizontalLayout {
+            y: 27px;
+            height: 28px;
+            alignment: center;
+            spacing: 4px;
+            Image {
+                y: 4px;
+                width: 20px;
+                height: 20px;
+                source: Now.icons.play-small;
+                colorize: #fff;
+            }
+            Text {
+                text: Pages.menu-track.title;
+                color: #fff;
+                font-family: "YS Music Headline";
+                font-weight: 700;
+                font-size: 21px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+        TouchArea {
+            clicked => {
+                root.open = false;
+                Pages.menu-action(0);
+            }
+        }
+    }
+    RoundItem {
+        x: parent.width / 2 - 144px;
+        y: 232px;
+        icon: Pages.menu-liked ? Now.icons.liked : Now.icons.like;
+        tint: Pages.menu-liked ? #f2c200 : T.fg.with-alpha(0.90);
+        text: "Нравится";
+        clicked => { Pages.menu-action(1); }
+    }
+    RoundItem {
+        x: parent.width / 2 - 48px;
+        y: 232px;
+        icon: Now.icons.play-small;
+        text: "Следующим";
+        clicked => {
+            root.open = false;
+            Pages.menu-action(2);
+        }
+    }
+    RoundItem {
+        x: parent.width / 2 + 48px;
+        y: 232px;
+        icon: Now.icons.queue;
+        text: "В очередь";
+        clicked => {
+            root.open = false;
+            Pages.menu-action(3);
+        }
+    }
+    MenuItem {
+        y: 352px;
+        icon: Now.icons.share;
+        text: "Поделиться";
+        clicked => {
+            root.open = false;
+            Pages.menu-action(4);
+        }
+    }
+    MenuItem {
+        y: 400px;
+        icon: Now.icons.add;
+        text: "Добавить в плейлист";
+        clicked => {
+            root.open = false;
+            Pages.pick-open = true;
+        }
+    }
+    MenuItem {
+        y: 448px;
+        icon: Now.icons.album;
+        text: "Перейти к альбому";
+        clicked => {
+            root.open = false;
+            Pages.menu-action(6);
+        }
+    }
+    MenuItem {
+        y: 496px;
+        icon: Now.icons.listeners;
+        text: "Перейти к исполнителю";
+        clicked => {
+            root.open = false;
+            Pages.menu-action(7);
+        }
+    }
+    Rectangle {
+        x: 16px;
+        y: 556px;
+        width: parent.width - 32px;
+        height: 1px;
+        background: T.fg.with-alpha(0.10);
+    }
+    MenuItem {
+        y: 564px;
+        icon: Now.icons.dislike;
+        text: "Не нравится";
+        grey: true;
+        clicked => {
+            root.open = false;
+            Pages.menu-action(8);
+        }
+    }
+}
+
+/// Выбор плейлиста для трека из меню.
+export component PickSheet inherits Sheet {
+    open <=> Pages.pick-open;
+    panel-height: min(root.height * 0.7, 88px + Now.playlists.length * 72px);
+    Text {
+        x: 16px;
+        y: 30px;
+        text: "Добавить в плейлист";
+        color: T.fg;
+        font-size: 22px;
+        font-weight: 700;
+    }
+    Flickable {
+        y: 76px;
+        height: root.panel-height - 76px;
+        content-height: Now.playlists.length * 72px;
+        for row[i] in Now.playlists: Rectangle {
+            y: i * 72px;
+            height: 72px;
+            Cover {
+                x: 16px;
+                y: 8px;
+                width: 56px;
+                height: 56px;
+                source: row.cover;
+            }
+            Text {
+                x: 84px;
+                y: 16px;
+                width: parent.width - 100px;
+                text: row.title;
+                color: T.fg;
+                font-size: 17px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            Text {
+                x: 84px;
+                y: 40px;
+                width: parent.width - 100px;
+                text: row.subtitle;
+                color: T.fg.with-alpha(0.55);
+                font-size: 14px;
+                overflow: elide;
+            }
+            TouchArea {
+                clicked => {
+                    root.open = false;
+                    Pages.pick(i);
+                }
+            }
+        }
+    }
+}
+
+export component ArtistsSheet inherits Sheet {
+    open <=> Pages.artists-open;
+    panel-height: 112px + Pages.artist-names.length * 56px;
+    Text {
+        x: 16px;
+        y: 30px;
+        text: "Исполнители";
+        color: T.fg;
+        font-size: 22px;
+        font-weight: 700;
+    }
+    for name[i] in Pages.artist-names: Rectangle {
+        y: 76px + i * 56px;
+        height: 56px;
+        Text {
+            x: 16px;
+            width: parent.width - 32px;
+            text: name;
+            color: T.fg;
+            font-size: 17px;
+            font-weight: 500;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            clicked => {
+                root.open = false;
+                Pages.pick-artist(i);
+            }
+        }
+    }
+}
+
+export component MenuSheet inherits Sheet {
+    callback lyrics();
+    callback playlists();
+    panel-height: 668px;
+
+    Cover {
+        x: 16px;
+        y: 38.4px;
+        width: 80px;
+        height: 80px;
+        radius: 8px;
+        source: Now.cover;
+    }
+    Text {
+        x: 108px;
+        y: 55px;
+        width: parent.width - 124px;
+        text: Now.title;
+        color: T.fg;
+        font-size: 22px;
+        font-weight: 700;
+        overflow: elide;
+    }
+    Text {
+        x: 108px;
+        y: 84px;
+        text: Now.duration-text;
+        color: T.fg.with-alpha(0.55);
+        font-size: 15px;
+    }
+    Cover {
+        x: 16px;
+        y: 134.5px;
+        width: 36px;
+        height: 36px;
+        radius: 18px;
+        source: Now.avatar;
+    }
+    Text {
+        x: 60px;
+        y: 141px;
+        width: parent.width - 76px;
+        text: Now.artists;
+        color: T.fg.with-alpha(0.90);
+        font-size: 17px;
+        overflow: elide;
+    }
+    Rectangle {
+        x: 16px;
+        y: 203.3px;
+        width: parent.width - 32px;
+        height: 64px;
+        border-radius: 16px;
+        clip: true;
+        background: @linear-gradient(170deg, #2b2626 0%, #110f0f 50%, #3a3535 100%);
+        Rectangle {
+            x: parent.width * 0.5;
+            y: 24px;
+            width: parent.width * 0.7;
+            height: 56px;
+            border-radius: 28px;
+            background: @radial-gradient(circle, #ffffff2e 0%, #ffffff00 70%);
+        }
+        Text {
+            y: 10px;
+            width: parent.width;
+            text: "Моя волна по треку";
+            color: #ffffffb3;
+            font-size: 15px;
+            font-weight: 500;
+            horizontal-alignment: center;
+        }
+        HorizontalLayout {
+            y: 27px;
+            height: 28px;
+            alignment: center;
+            spacing: 4px;
+            Image {
+                y: 4px;
+                width: 20px;
+                height: 20px;
+                source: Now.icons.play-small;
+                colorize: #fff;
+            }
+            Text {
+                text: Now.title;
+                color: #fff;
+                font-family: "YS Music Headline";
+                font-weight: 700;
+                font-size: 21px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+        TouchArea {
+            clicked => {
+                root.open = false;
+                Now.track-wave();
+            }
+        }
+    }
+    RoundItem {
+        x: parent.width / 2 - 96px;
+        y: 307.4px;
+        icon: Now.liked ? Now.icons.liked : Now.icons.like;
+        tint: Now.liked ? #f2c200 : T.fg.with-alpha(0.90);
+        text: "Нравится";
+        clicked => { Now.like(); }
+    }
+    RoundItem {
+        x: parent.width / 2;
+        y: 307.4px;
+        icon: Now.icons.trailer;
+        text: "Трейлер";
+        clicked => {
+            root.open = false;
+            Now.trailer();
+        }
+    }
+    MenuItem {
+        y: 411.4px;
+        icon: Now.icons.share;
+        text: "Поделиться";
+        clicked => {
+            root.open = false;
+            Now.share();
+        }
+    }
+    MenuItem {
+        y: 459.4px;
+        icon: Now.icons.add;
+        text: "Добавить в плейлист";
+        clicked => {
+            root.open = false;
+            root.playlists();
+        }
+    }
+    if Now.has-lyrics: MenuItem {
+        y: 507.4px;
+        icon: Now.icons.text;
+        text: "Показать текст песни";
+        clicked => {
+            root.open = false;
+            root.lyrics();
+        }
+    }
+    Rectangle {
+        x: 16px;
+        y: 572px;
+        width: parent.width - 32px;
+        height: 1px;
+        background: T.fg.with-alpha(0.10);
+    }
+    MenuItem {
+        y: 579.5px;
+        icon: Now.icons.dislike;
+        text: "Не нравится";
+        grey: true;
+        clicked => {
+            root.open = false;
+            Now.dislike();
+        }
+    }
+}
+
+export component QualitySheet inherits Sheet {
+    panel-height: 470px;
+    Text {
+        y: 38px;
+        width: parent.width;
+        text: "Настройки звука";
+        color: T.fg;
+        font-family: "YS Music Headline";
+        font-weight: 700;
+        font-size: 22px;
+        horizontal-alignment: center;
+    }
+    QualityOption {
+        y: 94px;
+        height: 88px;
+        width: parent.width;
+        title: "Автоматическое";
+        text: "Звук автоматически подстраивается под текущее качество вашей сети";
+        checked: Now.quality == 0;
+        clicked => { Now.set-quality(0); }
+    }
+    QualityOption {
+        y: 182.2px;
+        height: 103px;
+        width: parent.width;
+        title: "Превосходное";
+        text: "Музыка в lossless и других высококачественных форматах — для безлимитного интернета и хорошей акустики";
+        checked: Now.quality == 1;
+        clicked => { Now.set-quality(1); }
+    }
+    QualityOption {
+        y: 285.4px;
+        height: 88px;
+        width: parent.width;
+        title: "Оптимальное";
+        text: "Сбалансированный звук для большинства устройств, со средним расходом трафика";
+        checked: Now.quality == 2;
+        clicked => { Now.set-quality(2); }
+    }
+    QualityOption {
+        y: 373.4px;
+        height: 70px;
+        width: parent.width;
+        title: "Экономичное";
+        text: "Для медленного интернета, с минимальным расходом трафика";
+        checked: Now.quality == 3;
+        clicked => { Now.set-quality(3); }
+    }
+}
+
+export component TimerSheet inherits Sheet {
+    in-out property <int> minutes: 30;
+    in-out property <bool> end-of-track;
+    // Центр циферблата и радиусы кольца и подписей.
+    property <length> cx: self.width / 2;
+    property <length> cy: 325.8px;
+    property <length> r: 132px;
+    property <float> turn: min(root.minutes, 59.99) / 60;
+    panel-height: 602px;
+
+    Text {
+        y: 47px;
+        width: parent.width;
+        text: "Таймер сна";
+        color: T.fg;
+        font-family: "YS Music Headline";
+        font-weight: 700;
+        font-size: 22px;
+        horizontal-alignment: center;
+    }
+    Text {
+        x: 20.4px;
+        y: 116.9px;
+        text: "Конец трека или выпуска";
+        color: T.fg.with-alpha(0.90);
+        font-size: 16px;
+    }
+    Rectangle {
+        x: parent.width - 54px;
+        y: 117px;
+        width: 34px;
+        height: 24px;
+        Rectangle {
+            y: 5px;
+            height: 14px;
+            border-radius: 7px;
+            background: root.end-of-track ? T.fg.with-alpha(0.70) : T.fg.with-alpha(0.30);
+        }
+        Rectangle {
+            x: root.end-of-track ? parent.width - self.width : 0;
+            animate x { duration: 150ms; }
+            width: 22px;
+            height: 22px;
+            y: 1px;
+            border-radius: 11px;
+            background: #fff;
+            drop-shadow-blur: 3px;
+            drop-shadow-color: #0000004d;
+        }
+        TouchArea {
+            clicked => { root.end-of-track = !root.end-of-track; }
+        }
+    }
+
+    // Циферблат: серое кольцо, чёрная дуга от нуля до выбранных минут, кружок на конце.
+    Path {
+        x: root.cx - root.r;
+        y: root.cy - root.r;
+        width: 2 * root.r;
+        height: 2 * root.r;
+        viewbox-width: 2 * root.r / 1px;
+        viewbox-height: 2 * root.r / 1px;
+        stroke: T.fg.with-alpha(0.08);
+        stroke-width: 3px;
+        commands: "M " + (root.r / 1px) + " 1.5 A " + (root.r / 1px - 1.5) + " " + (root.r / 1px - 1.5) + " 0 1 1 " + (root.r / 1px - 0.01) + " 1.5";
+        opacity: root.end-of-track ? 0.4 : 1;
+    }
+    if root.minutes > 0: Path {
+        x: root.cx - root.r;
+        y: root.cy - root.r;
+        width: 2 * root.r;
+        height: 2 * root.r;
+        viewbox-width: 2 * root.r / 1px;
+        viewbox-height: 2 * root.r / 1px;
+        stroke: #1a1a1a;
+        stroke-width: 3px;
+        commands: "M " + (root.r / 1px) + " 1.5 A " + (root.r / 1px - 1.5) + " " + (root.r / 1px - 1.5) + " 0 " + (root.turn > 0.5 ? 1 : 0) + " 1 " + (root.r / 1px + (root.r / 1px - 1.5) * Math.sin(root.turn * 360deg)) + " " + (root.r / 1px - (root.r / 1px - 1.5) * Math.cos(root.turn * 360deg));
+        opacity: root.end-of-track ? 0.4 : 1;
+    }
+    Rectangle {
+        x: root.cx + (root.r - 1.5px) * Math.sin(root.turn * 360deg) - self.width / 2;
+        y: root.cy - (root.r - 1.5px) * Math.cos(root.turn * 360deg) - self.height / 2;
+        width: 19px;
+        height: 19px;
+        border-radius: 9.5px;
+        background: #1a1a1a;
+        opacity: root.end-of-track ? 0.4 : 1;
+    }
+    for i in 12: Text {
+        x: root.cx + 160px * Math.sin(i * 30deg) - 20px;
+        y: root.cy - 160px * Math.cos(i * 30deg) - 12px;
+        width: 40px;
+        height: 24px;
+        text: i * 5;
+        color: T.fg.with-alpha(0.55);
+        font-size: 17px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Text {
+        y: root.cy - 30px;
+        width: parent.width;
+        height: 60px;
+        text: Now.timer-on ? Now.timer-left : (root.minutes < 10 ? "0" : "") + root.minutes + ":00";
+        color: T.fg;
+        font-family: T.display-font;
+        font-weight: 700;
+        font-size: 40px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        x: root.cx - root.r - 40px;
+        y: root.cy - root.r - 40px;
+        width: 2 * root.r + 80px;
+        height: 2 * root.r + 80px;
+        enabled: !root.end-of-track && !Now.timer-on;
+        moved => {
+            if self.pressed {
+                let a = Math.atan2((self.mouse-x - self.width / 2) / 1px, (self.height / 2 - self.mouse-y) / 1px) / 1deg;
+                root.minutes = Math.round((a < 0 ? a + 360 : a) / 6);
+            }
+        }
+    }
+
+    Rectangle {
+        x: (parent.width - 253px) / 2;
+        y: 523px;
+        width: 253px;
+        height: 47px;
+        border-radius: 23.5px;
+        background: go.pressed ? #f0d400 : #ffe100;
+        Text {
+            text: Now.timer-on ? "Остановить" : "Запустить";
+            color: #000;
+            font-size: 17px;
+            font-weight: 500;
+        }
+        go := TouchArea {
+            clicked => {
+                if Now.timer-on {
+                    Now.stop-timer();
+                } else if root.end-of-track || root.minutes > 0 {
+                    Now.start-timer(root.minutes, root.end-of-track);
+                    root.open = false;
+                }
+            }
+        }
+    }
+}

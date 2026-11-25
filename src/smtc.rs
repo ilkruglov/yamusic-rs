@@ -14,6 +14,121 @@ use windows::Win32::System::WinRT::{
     RO_INIT_SINGLETHREADED,
 };
 
+use std::path::Path;
+use std::ptr::null_mut;
+use std::sync::Arc;
+use std::time::Instant;
+use windows::core::{Interface, GUID, HSTRING, PCWSTR};
+use windows::Foundation::{TimeSpan, Uri};
+use windows::Media::{PlaybackPositionChangeRequestedEventArgs, SystemMediaTransportControlsTimelineProperties};
+use windows::Storage::Streams::RandomAccessStreamReference;
+use windows::Win32::Foundation::PROPERTYKEY;
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
+use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+
+const AUMID: &str = "SpolzerMod.YaMusicRS";
+
+/// `System.AppUserModel.ID` (`{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}`, pid 5).
+const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3),
+    pid: 5,
+};
+
+/// Задаёт AppUserModelID процесса, чтобы Windows 11 показывала имя и значок приложения
+/// в карточке системного плеера вместо «Unknown app». Вызывать в начале `main()` до создания окон.
+pub fn register_app_id() {
+    let aumid = crate::sys::wide(AUMID);
+    unsafe {
+        let _ = SetCurrentProcessExplicitAppUserModelID(aumid.as_ptr());
+    }
+}
+
+/// Создаёт или обновляет ярлык в меню «Пуск» с нашим `AppUserModelID`: по нему Windows 11
+/// подставляет имя и значок приложения в карточку системного плеера. Если ярлык уже указывает
+/// на этот же exe с нужным `AppUserModelID`, файл не трогаем.
+fn ensure_start_menu_shortcut() -> windows::core::Result<()> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Ok(());
+    };
+    let programs = crate::sys::config_base().join(r"Microsoft\Windows\Start Menu\Programs");
+    if !programs.is_dir() {
+        return Ok(());
+    }
+    let lnk = programs.join(format!("{}.lnk", env!("APP_NAME")));
+    if lnk.exists() && shortcut_matches(&lnk, &exe) {
+        return Ok(());
+    }
+    write_shortcut(&lnk, &exe)
+}
+
+fn shortcut_matches(lnk: &Path, exe: &Path) -> bool {
+    let lnk_w = HSTRING::from(lnk.as_os_str());
+    unsafe {
+        let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER)
+        else {
+            return false;
+        };
+        let Ok(file) = link.cast::<IPersistFile>() else {
+            return false;
+        };
+        if file.Load(PCWSTR(lnk_w.as_ptr()), STGM_READ).is_err() {
+            return false;
+        }
+        let mut buf = [0u16; 1024];
+        if link.GetPath(&mut buf, null_mut(), 0).is_err() {
+            return false;
+        }
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let target = String::from_utf16_lossy(&buf[..n]);
+        if target.to_lowercase() != exe.to_string_lossy().to_lowercase() {
+            return false;
+        }
+        let Ok(store) = link.cast::<IPropertyStore>() else {
+            return false;
+        };
+        let Ok(val) = store.GetValue(&PKEY_APP_USER_MODEL_ID) else {
+            return false;
+        };
+        val.to_string() == AUMID
+    }
+}
+
+fn write_shortcut(lnk: &Path, exe: &Path) -> windows::core::Result<()> {
+    let exe_w = HSTRING::from(exe.as_os_str());
+    let lnk_w = HSTRING::from(lnk.as_os_str());
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        link.SetPath(PCWSTR(exe_w.as_ptr()))?;
+        link.SetIconLocation(PCWSTR(exe_w.as_ptr()), 0)?;
+        let store: IPropertyStore = link.cast()?;
+        let val = PROPVARIANT::from(AUMID);
+        store.SetValue(&PKEY_APP_USER_MODEL_ID, &val)?;
+        store.Commit()?;
+        let file: IPersistFile = link.cast()?;
+        file.Save(PCWSTR(lnk_w.as_ptr()), true)?;
+    }
+    Ok(())
+}
+
+fn update_timeline(smtc: &Controls, position: f32, duration: f32) {
+    let Ok(tl) = SystemMediaTransportControlsTimelineProperties::new() else { return };
+    let end = ticks(duration);
+    let pos = ticks(position.clamp(0.0, duration));
+    let _ = tl.SetStartTime(ticks(0.0));
+    let _ = tl.SetMinSeekTime(ticks(0.0));
+    let _ = tl.SetEndTime(end);
+    let _ = tl.SetMaxSeekTime(end);
+    let _ = tl.SetPosition(pos);
+    let _ = smtc.UpdateTimelineProperties(&tl);
+}
+
+fn ticks(secs: f32) -> TimeSpan {
+    TimeSpan { Duration: (secs.max(0.0) as f64 * 10_000_000.0) as i64 }
+}
+
 struct Apartment;
 impl Apartment {
     fn new() -> Result<Self> {
@@ -35,6 +150,9 @@ impl Drop for Apartment {
 pub(crate) struct Session {
     controls: Controls,
     token: i64,
+    seek_token: i64,
+    timeline: Option<(Instant, f32, f32)>,
+    track_id: Option<String>,
     status: Playback,
     text: Option<(String, String, String, String)>,
     has_track: bool,
@@ -42,8 +160,11 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(hwnd: HWND, on_button: impl Fn(Event) + Send + 'static) -> Result<Self> {
+    pub(crate) fn new(hwnd: HWND, on_button: impl Fn(Event) + Send + Sync + 'static) -> Result<Self> {
         let apartment = Apartment::new()?;
+        if let Err(e) = ensure_start_menu_shortcut() {
+            crate::config::log(format!("SMTC: ярлык меню Пуск: {e}"));
+        }
         let factory = factory::<Controls, ISystemMediaTransportControlsInterop>()?;
         let controls: Controls = unsafe { factory.GetForWindow(hwnd)? };
         controls.SetIsEnabled(false)?;
@@ -51,11 +172,14 @@ impl Session {
         controls.SetIsPauseEnabled(true)?;
         controls.SetIsPreviousEnabled(false)?;
         controls.SetIsNextEnabled(false)?;
+        controls.SetIsStopEnabled(true)?;
+        let on_seek = Arc::new(on_button);
+        let on_button = on_seek.clone();
         let token = controls.ButtonPressed(&TypedEventHandler::<Controls, Pressed>::new(
             move |_, args| {
                 let event = match args.ok()?.Button()? {
                     Button::Play => Event::Play,
-                    Button::Pause => Event::Pause,
+                    Button::Pause | Button::Stop => Event::Pause,
                     Button::Next => Event::Next,
                     Button::Previous => Event::Prev,
                     _ => return Ok(()),
@@ -64,8 +188,16 @@ impl Session {
                 Ok(())
             },
         ))?;
+        let seek_token = controls.PlaybackPositionChangeRequested(&TypedEventHandler::<Controls, PlaybackPositionChangeRequestedEventArgs>::new(move |_, args| {
+            let ms = args.ok()?.RequestedPlaybackPosition()?.Duration / 10_000;
+            on_seek(Event::Seek(ms.max(0)));
+            Ok(())
+        }))?;
         Ok(Self {
             controls,
+            seek_token,
+            timeline: None,
+            track_id: None,
             token,
             status: Playback::Closed,
             text: None,
@@ -85,12 +217,15 @@ impl Session {
                     t.album_title.as_str(),
                 )
             });
-        if self
+        let id = track.map(|t| t.id.as_str());
+        let track_changed = self.track_id.as_deref() != id;
+        if track_changed || self
             .text
             .as_ref()
             .is_none_or(|(t, v, a, l)| t != title || v != version || a != artists || l != album)
         {
             let updater = self.controls.DisplayUpdater()?;
+            updater.ClearAll()?;
             updater.SetType(MediaPlaybackType::Music)?;
             let music = updater.MusicProperties()?;
             let display_title = if version.is_empty() {
@@ -101,7 +236,15 @@ impl Session {
             music.SetTitle(&display_title)?;
             music.SetArtist(&artists.into())?;
             music.SetAlbumTitle(&album.into())?;
+            if let Some(url) = track.and_then(|t| t.cover_url(400)) {
+                if let Ok(uri) = Uri::CreateUri(&HSTRING::from(url)) {
+                    if let Ok(image) = RandomAccessStreamReference::CreateFromUri(&uri) {
+                        let _ = updater.SetThumbnail(&image);
+                    }
+                }
+            }
             updater.Update()?;
+            self.track_id = id.map(str::to_owned);
             self.text = Some((title.into(), version.into(), artists.into(), album.into()));
         }
         if self.has_track != track.is_some() {
@@ -116,6 +259,16 @@ impl Session {
         } else {
             Playback::Paused
         };
+        if track.is_some() && state.duration > 0.0 {
+            let jumped = self.timeline.is_none_or(|(at, pos, dur)| {
+                let expected = pos + if state.playing { at.elapsed().as_secs_f32() } else { 0.0 };
+                (expected - state.position).abs() > 1.5 || (dur - state.duration).abs() > 0.5
+            });
+            if track_changed || self.status != status || jumped {
+                update_timeline(&self.controls, state.position, state.duration);
+                self.timeline = Some((Instant::now(), state.position, state.duration));
+            }
+        } else { self.timeline = None; }
         if self.status != status {
             self.controls.SetPlaybackStatus(status)?;
             if self.status == Playback::Closed {
@@ -129,6 +282,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        let _ = self.controls.RemovePlaybackPositionChangeRequested(self.seek_token);
         let _ = self.controls.RemoveButtonPressed(self.token);
         let _ = self.controls.SetIsEnabled(false);
         let _ = self.controls.SetPlaybackStatus(Playback::Closed);
@@ -180,11 +334,9 @@ mod tests {
             let _ = tx.send(event);
         })
         .unwrap();
-        let mut state = Shared {
-            status: Status::Ready,
-            paused: true,
-            ..Default::default()
-        };
+        let mut state = Shared::default();
+        state.status = Status::Ready;
+        state.paused = true;
         state.track = crate::api::parse_track(&serde_json::json!({
             "id":"7", "title": title, "version":"Live", "artists":[{"id":"8","name":"SMTC artist"}]
         }));

@@ -1,0 +1,768 @@
+// Фон «Моей волны» рисует OpenGL под прозрачным окном.
+
+import { Icons, WheelCard, Row, ArtistCard, Now, Cover, T } from "common.slint";
+import { Player } from "player.slint";
+import { MenuSheet, QualitySheet, TimerSheet, TrackSheet, PickSheet, ArtistsSheet } from "sheets.slint";
+import { Prof, ProfileScreens, AboutPage, LogoutSheet } from "profile.slint";
+import { Pages, PageView, MiniPlayer, PCard, PRow, PBlock, PPage } from "pages.slint";
+
+export { Icons, WheelCard, Row, ArtistCard, Now, Pages, PCard, PRow, PBlock, PPage, Prof, T }
+
+component TabIcon inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <color> tint;
+    in property <bool> rail;
+    in property <bool> selected;
+    callback clicked();
+
+    width: root.rail ? 80px : 48px;
+    height: root.rail ? 60px : 48px;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+
+    if root.rail && root.selected: Rectangle {
+        y: 4px;
+        width: 52px;
+        height: 32px;
+        border-radius: 16px;
+        background: root.tint.with-alpha(0.14);
+    }
+    Image {
+        source: root.icon;
+        y: root.rail ? 8px : (parent.height - self.height) / 2;
+        width: 24px;
+        height: 24px;
+        colorize: root.tint;
+    }
+    if root.rail: Text {
+        y: 37px;
+        width: parent.width;
+        height: 18px;
+        text: root.label;
+        color: root.tint;
+        font-size: 11px;
+        horizontal-alignment: center;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component LoginScreen inherits Rectangle {
+    in property <string> code;
+    in property <string> hint;
+    in property <image> logo;
+    callback open-login();
+    callback retry();
+
+    Flickable {
+        content-width: self.width;
+        content-height: max(self.height, form.y + form.preferred-height + 24px);
+        Image {
+            source: root.logo;
+            y: root.height < 560px ? 24px : 58px;
+            height: 44px;
+            width: 187px;
+            colorize: #ff0;
+        }
+        form := VerticalLayout {
+            x: (root.width - self.width) / 2;
+            y: max(88px, min(260px, (root.height - self.preferred-height) / 2));
+            width: min(root.width, 460px);
+            height: self.preferred-height;
+            alignment: start;
+            spacing: 16px;
+            padding-left: 32px;
+            padding-right: 32px;
+            Text {
+                text: "Вход в Яндекс";
+                color: #fff;
+                font-size: 28px;
+                font-weight: 700;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: root.code == "" ? "…" : root.code;
+                color: #ffdb4d;
+                font-family: T.display-font;
+                font-size: 44px;
+                font-weight: 700;
+                letter-spacing: 4px;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: root.hint;
+                color: #ffffff99;
+                font-size: 16px;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+            Rectangle {
+                height: 56px;
+                border-radius: 28px;
+                background: open-ta.pressed ? #e6e600 : #ff0;
+                Text {
+                    text: "Открыть ya.ru/device";
+                    color: #000;
+                    font-size: 17px;
+                    font-weight: 500;
+                }
+                open-ta := TouchArea {
+                    clicked => {
+                        root.copy-code();
+                        root.open-login();
+                    }
+                }
+            }
+            if root.code != "": Rectangle {
+                height: 56px;
+                border-radius: 28px;
+                background: copy-ta.pressed ? #ffffff33 : #ffffff1a;
+                Text {
+                    text: root.copied ? "Код скопирован" : "Скопировать код";
+                    color: #fff;
+                    font-size: 17px;
+                    font-weight: 500;
+                }
+                copy-ta := TouchArea {
+                    clicked => { root.copy-code(); }
+                }
+            }
+        }
+    }
+    // У Slint нет функции «положить в буфер», а у поля ввода есть copy().
+    clip := TextInput {
+        visible: false;
+        read-only: true;
+        text: root.code;
+    }
+    property <bool> copied;
+    function copy-code() {
+        if root.code == "" {
+            return;
+        }
+        clip.select-all();
+        clip.copy();
+        root.copied = true;
+    }
+}
+
+export component App inherits Window {
+    background: transparent;
+    default-font-family: "YS Text";
+
+    in property <Icons> icons;
+    in property <bool> logged-in;
+
+    property <bool> rail: root.width >= 600px && root.height >= 300px;
+    property <bool> wide-wave: root.width >= 540px && root.width > root.height;
+    // Лёжа на планшете заголовок волны в левой колонке, и пятно встаёт над ним, а не посреди экрана.
+    // Пятно движется только на экране волны: под страницами и плеером его не видно.
+    out property <bool> wave-moving: Prof.wave-motion && root.logged-in && !Pages.shown && !player.open;
+    out property <length> wave-shift: root.wide-wave ? root.rail-width + min(600px, (root.width - root.rail-width) * 0.52) / 2 - root.width / 2 : 0px;
+    property <length> rail-width: root.rail ? 88px : 0px;
+    property <length> nav-height: root.rail ? 0px : 83.8px;
+    property <length> page-bottom: root.nav-height + (Now.has-track ? 84px : 16px);
+    in property <string> login-code;
+    in property <string> login-hint;
+    // Волну уже запускали: экран показывает исполнителя вместо большой кнопки Play.
+    in property <bool> started;
+    in property <[WheelCard]> wheel;
+    in-out property <length> wheel-offset;
+
+    // 0 волна, 1 «Что послушать», 2 концерты, 3 коллекция.
+    in property <int> tab;
+    callback tab-clicked(int);
+    callback play-wheel(int);
+    callback open-login();
+    callback retry-login();
+    // Плеер что-то поменял: перечитать его состояние.
+    callback refresh();
+
+    // Шаг колеса волн: расстояние между центрами соседних карточек.
+    out property <length> wheel-spacing: 131px;
+    // Колесо крутится по кругу: лента на сотни оборотов, начало в её середине.
+    out property <int> wheel-laps: 400;
+    out property <length> wheel-home: -(root.wheel-laps / 2 * root.wheel.length + 1) * root.wheel-spacing;
+
+    if !root.logged-in: LoginScreen {
+        width: root.width;
+        height: root.height;
+        code: root.login-code;
+        hint: root.login-hint;
+        logo: root.icons.logo;
+        open-login => { root.open-login(); }
+        retry => { root.retry-login(); }
+    }
+
+    if root.logged-in: wave := Rectangle {
+        x: root.rail-width;
+        width: root.width - self.x;
+        height: root.height - root.nav-height;
+        visible: !Pages.shown;
+
+        property <length> header-y: self.height < 680px ? 24px : T.top + 6px;
+        property <length> portrait-offset: root.rail && !root.wide-wave ? clamp((self.height - 850px) / 2, 0px, 180px) : 0px;
+        property <length> wheel-y: root.wide-wave ? max(76px, (self.height - 176px) / 2) : min(600px + portrait-offset, max(202px, self.height - 148px));
+        property <length> track-y: root.wide-wave ? min(450.3px, self.height - 68px) : min(450.3px + portrait-offset, wheel-y - 64px);
+        property <length> art-size: clamp(track-y - header-y - 106px, 48px, 96px);
+        property <length> play-y: track-y - art-size - 12px;
+
+        Rectangle {
+            x: root.wide-wave ? 0px : (wave.width - self.width) / 2;
+            width: root.wide-wave ? min(600px, wave.width * 0.52) : min(560px, wave.width);
+            height: wave.height;
+            // Шапка: логотип по центру и поиск справа. Когда волна играет, вместо логотипа надпись.
+            if !root.started: Image {
+                source: root.icons.logo;
+                x: (parent.width - self.width) / 2;
+                y: wave.header-y;
+                width: 187px;
+                height: 44px;
+                colorize: #ff0;
+            }
+            if root.started && Now.pill != "": Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: wave.header-y + 2px;
+                height: 40px;
+                width: pill-row.preferred-width;
+                border-radius: 20px;
+                background: #ffffff1f;
+                pill-row := HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 6px;
+                    spacing: 4px;
+                    Text {
+                        text: Now.pill;
+                        color: #fff;
+                        font-size: 15px;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        max-width: 240px;
+                    }
+                    Rectangle {
+                        width: 32px;
+                        Path {
+                            width: 14px;
+                            height: 14px;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            stroke: #fff;
+                            stroke-width: 2px;
+                            commands: "M5 5l14 14 M19 5L5 19";
+                        }
+                        TouchArea {
+                            clicked => { Now.back-to-wave(); }
+                        }
+                    }
+                }
+            }
+            if root.started && Now.pill == "": Text {
+                y: wave.header-y;
+                width: parent.width;
+                height: 44px;
+                text: "Моя волна";
+                color: #ff0;
+                font-family: "YS Music Headline";
+                font-weight: 900;
+                font-size: 20px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            if !root.started: Text {
+                text: "Моя волна";
+                x: 0;
+                y: max(wave.header-y + 40px, wave.play-y - 100px);
+                width: parent.width;
+                horizontal-alignment: center;
+                font-family: "YS Music Headline";
+                font-weight: 900;
+                font-size: clamp(parent.width / 6, 28px, 63px);
+                color: #fff;
+            }
+
+            // Большая кнопка Play до первого запуска.
+            if !root.started: Rectangle {
+                x: (parent.width - wave.art-size) / 2;
+                y: wave.play-y;
+                width: wave.art-size;
+                height: wave.art-size;
+                border-radius: self.width / 2;
+                background: play-ta.pressed ? #e6e600 : #ff0;
+                Image {
+                    source: Now.playing ? root.icons.pause : root.icons.play;
+                    width: 41.6px;
+                    height: 41.6px;
+                    colorize: #000000e6;
+                }
+                play-ta := TouchArea {
+                    clicked => { Now.play-pause(); }
+                }
+            }
+
+            // Во время игры: имя исполнителя, его фото без фона и маленькая обложка.
+            if root.started: Rectangle {
+                probe := Text {
+                    visible: false;
+                    text: Now.artist;
+                    font-family: "YS Music Headline";
+                    font-weight: 900;
+                    font-size: 56px;
+                }
+                property <length> name-y: Now.cutout.width > 0 ? wave.header-y + 62px : max(wave.header-y + 40px, wave.play-y - 80px);
+                TouchArea {
+                    y: parent.name-y;
+                    height: 64px;
+                    clicked => { Now.open-artist(-1); }
+                }
+                Text {
+                    y: parent.name-y;
+                    width: parent.width;
+                    height: 64px;
+                    text: Now.artist;
+                    color: #fff;
+                    font-family: "YS Music Headline";
+                    font-weight: 900;
+                    font-size: 56px * min(1, (parent.width - 32px) / max(1px, probe.preferred-width));
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                if Now.cutout.width > 0: TouchArea {
+                    y: wave.header-y + 72px;
+                    width: min(parent.width - 56px, self.height);
+                    height: max(0px, wave.track-y - self.y);
+                    Image {
+                        source: Now.cutout;
+                        image-fit: contain;
+                    }
+                    clicked => { Now.open-artist(-1); }
+                }
+                TouchArea {
+                    x: (parent.width - wave.art-size) / 2;
+                    y: wave.play-y;
+                    width: wave.art-size;
+                    height: wave.art-size;
+                    Cover {
+                        source: Now.cover;
+                        radius: 9px;
+                    }
+                    clicked => { player.open = true; }
+                }
+            }
+
+            // Плашка трека. Во время игры слева кружок паузы, справа кружок лайка.
+            Rectangle {
+                x: root.started ? 92.2px : 32px;
+                y: wave.track-y;
+                width: parent.width - (root.started ? 184.4px : 64px);
+                height: 56px;
+                border-radius: 28px;
+                clip: true;
+                background: #ffffff14;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * clamp(Now.progress, 0, 1);
+                    height: parent.height;
+                    background: #ffffff14;
+                }
+                HorizontalLayout {
+                    x: (root.started ? 16px : 56px) + plate-swipe.shift;
+                    width: parent.width - 2 * (root.started ? 16px : 56px);
+                    animate x { duration: plate-swipe.swiping ? 0ms : 200ms; }
+                    alignment: center;
+                    spacing: 6px;
+                    Text {
+                        text: Now.title != "" ? Now.title : Now.status;
+                        color: #ffffff99;
+                        font-family: "YS Music Headline";
+                        font-weight: 700;
+                        font-size: 17px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    if Now.explicit: Image {
+                        y: (56px - 16px) / 2;
+                        width: 16px;
+                        height: 16px;
+                        source: root.icons.explicit;
+                        colorize: #ffffff99;
+                    }
+                }
+                // Плашку листают вбок, как обложку в плеере: влево следующий трек, вправо предыдущий.
+                plate-swipe := SwipeGestureHandler {
+                    property <length> shift: self.swiping ? self.current-position.x - self.pressed-position.x : 0px;
+                    enabled: Now.has-track;
+                    handle-swipe-left: true;
+                    handle-swipe-right: true;
+                    swiped => {
+                        if self.current-position.x - self.pressed-position.x < -60px {
+                            Now.next();
+                        } else if self.current-position.x - self.pressed-position.x > 60px {
+                            Now.prev();
+                        }
+                    }
+                    TouchArea {
+                        clicked => {
+                            if Now.has-track {
+                                player.open = true;
+                            }
+                        }
+                    }
+                }
+                if !root.started: Rectangle {
+                    x: parent.width - 56px;
+                    width: 56px;
+                    height: 56px;
+                    Image {
+                        source: Now.liked ? root.icons.liked : root.icons.like;
+                        width: 24px;
+                        height: 24px;
+                        colorize: Now.liked ? #ff0 : #ffffffcc;
+                    }
+                    TouchArea {
+                        clicked => { Now.like(); }
+                    }
+                }
+            }
+            if root.started: Rectangle {
+                x: 32px;
+                y: wave.track-y;
+                width: 56px;
+                height: 56px;
+                border-radius: 28px;
+                background: #ffffff14;
+                Image {
+                    source: Now.playing ? root.icons.pause : root.icons.play;
+                    width: 28px;
+                    height: 28px;
+                    colorize: #ffffffcc;
+                }
+                TouchArea {
+                    clicked => { Now.play-pause(); }
+                }
+            }
+            if root.started: Rectangle {
+                x: parent.width - 88px;
+                y: wave.track-y;
+                width: 56px;
+                height: 56px;
+                border-radius: 28px;
+                background: #ffffff14;
+                Image {
+                    source: Now.liked ? root.icons.liked : root.icons.like;
+                    width: 24px;
+                    height: 24px;
+                    colorize: Now.liked ? #ff0 : #ffffffcc;
+                }
+                TouchArea {
+                    clicked => { Now.like(); }
+                }
+            }
+
+        }
+
+        Rectangle {
+            x: parent.width - 52px;
+            y: wave.header-y - 1.5px;
+            width: 48px;
+            height: 48px;
+            Image {
+                source: root.icons.search;
+                width: 24px;
+                height: 24px;
+                colorize: #ffffffe6;
+            }
+            TouchArea {
+                clicked => { Pages.open-search(); }
+            }
+        }
+
+        // Колесо волн: карточки стоят на дуге, средняя выше и крупнее.
+        wheel-flick := Flickable {
+            x: root.wide-wave ? min(600px, wave.width * 0.52) : 0px;
+            y: wave.wheel-y;
+            width: wave.width - self.x;
+            height: max(0px, wave.height - self.y);
+            property <float> curve: clamp((self.height - 126px) / 150px, 0, 1);
+            content-width: self.width + max(0, root.wheel-laps * root.wheel.length - 1) * root.wheel-spacing;
+            content-height: self.height;
+            content-x <=> root.wheel-offset;
+            property <duration> moved-at;
+            changed content-x => { self.moved-at = animation-tick(); }
+            property <int> n: root.wheel.length;
+            property <int> slot-count: ceil(self.width / root.wheel-spacing) + 3;
+            property <int> first: floor(-self.content-x / root.wheel-spacing) - ceil(self.slot-count / 2);
+
+            // Слотов столько, сколько влезает на экран. Слот держит свой номер, пока виден,
+            // и уходя за край, перескакивает на другую сторону.
+            for k in (n > 0 ? slot-count : 0): card-box := Rectangle {
+                property <int> ordinal: k + ceil((wheel-flick.first - k) / wheel-flick.slot-count) * wheel-flick.slot-count;
+                property <int> idx: mod(mod(self.ordinal, wheel-flick.n) + wheel-flick.n, wheel-flick.n);
+                property <WheelCard> card: root.wheel[self.idx];
+                // Сдвиг от центра экрана в dp и подъём по дуге радиуса 277.5 dp.
+                property <float> d: abs((self.ordinal * root.wheel-spacing + wheel-flick.content-x) / 1px);
+                property <float> arc: min(self.d, 277);
+                property <float> scale: 1 - 0.107 * min(self.d / 131, 1);
+                property <length> size: 64px * self.scale;
+                x: wheel-flick.width / 2 + self.ordinal * root.wheel-spacing - 67px;
+                // Центр обложки на 40 px ниже верха карточки.
+                y: 8px + wheel-flick.curve * (8.8 + 277.5 - sqrt(277.5 * 277.5 - self.arc * self.arc)) * 1px;
+                width: 134px;
+                height: 200px;
+
+                Image {
+                    y: 47px;
+                    width: 134px;
+                    height: 160px;
+                    source: card-box.card.blob;
+                }
+                Rectangle {
+                    x: (parent.width - parent.size) / 2;
+                    y: 40px - parent.size / 2;
+                    width: parent.size;
+                    height: parent.size;
+                    border-radius: card-box.card.round ? self.width / 2 : 8px * parent.scale;
+                    clip: true;
+                    background: #ffffff14;
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: card-box.card.cover;
+                        image-fit: cover;
+                    }
+                }
+                Rectangle {
+                    x: (parent.width - parent.size) / 2;
+                    y: 40px - parent.size / 2;
+                    width: parent.size;
+                    height: parent.size;
+                    border-radius: card-box.card.round ? self.width / 2 : 8px * parent.scale;
+                    border-width: 1px;
+                    border-color: #ffffff33;
+                }
+                VerticalLayout {
+                    x: 5px;
+                    y: 40px + parent.size / 2 + 3px;
+                    width: 124px;
+                    alignment: start;
+                    spacing: 2px;
+                    if card-box.card.description != "": Text {
+                        text: card-box.card.description;
+                        color: #ffffff80;
+                        font-size: 12px * card-box.scale;
+                        font-weight: 500;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: card-box.card.name;
+                        color: #fff;
+                        font-size: 15px * card-box.scale;
+                        font-weight: 500;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                        overflow: elide;
+                        max-height: 40px * card-box.scale;
+                    }
+                }
+                TouchArea {
+                    // Волну включает только тап на месте: не тот, которым остановили прокрутку колеса,
+                    // и не провёл пальцем вверх-вниз.
+                    property <bool> stops-scroll;
+                    pointer-event(e) => {
+                        if e.kind == PointerEventKind.down {
+                            self.stops-scroll = animation-tick() - wheel-flick.moved-at < 250ms;
+                        }
+                    }
+                    clicked => {
+                        if !self.stops-scroll && abs(self.mouse-x - self.pressed-x) < 16px && abs(self.mouse-y - self.pressed-y) < 16px {
+                            root.play-wheel(card-box.idx);
+                        }
+                    }
+                }
+            }
+        }
+
+    }
+
+    if root.logged-in && Pages.shown: PageView {
+        x: Pages.viewer-open ? 0px : root.rail-width;
+        width: root.width - self.x;
+        height: root.height;
+        icons: root.icons;
+        bottom: root.page-bottom;
+    }
+
+    if root.logged-in && Pages.shown && Prof.screen > 0: ProfileScreens {
+        x: root.rail-width;
+        width: root.width - self.x;
+        height: root.height;
+        icons: root.icons;
+        bottom: root.page-bottom;
+    }
+
+    if root.logged-in && Pages.shown && Now.has-track && !Pages.viewer-open: MiniPlayer {
+        x: root.rail-width + (root.width - root.rail-width - self.width) / 2;
+        y: root.height - root.nav-height - self.height;
+        width: min(root.width - root.rail-width - 24px, 680px);
+        icons: root.icons;
+        open => { player.open = true; }
+    }
+
+    if root.logged-in && !Pages.viewer-open: nav := Rectangle {
+        x: 0;
+        y: root.height - self.height;
+        width: root.rail ? root.rail-width : root.width;
+        height: root.rail ? root.height : root.nav-height;
+        background: Pages.shown ? (root.rail ? T.card : T.bg) : (root.rail ? #00000052 : transparent);
+        if root.rail: Rectangle {
+            x: parent.width - 1px;
+            width: 1px;
+            background: Pages.shown ? T.line : #ffffff1a;
+        }
+        for item[i] in [
+            { icon: root.icons.tab-wave, label: "Моя волна" },
+            { icon: root.icons.tab-home, label: "Обзор" },
+            { icon: root.icons.tab-concerts, label: "Концерты" },
+            { icon: root.icons.tab-collection, label: "Коллекция" }
+        ]: TabIcon {
+            x: root.rail ? (nav.width - self.width) / 2 : (nav.width / 4) * (i + 0.5) - self.width / 2;
+            y: root.rail ? (nav.height - 4 * self.height) / 2 + i * self.height : 8px;
+            icon: item.icon;
+            label: item.label;
+            rail: root.rail;
+            selected: root.tab == i;
+            tint: Pages.shown ? (self.selected ? T.fg : T.fg.with-alpha(0.55)) : (self.selected ? #ff0 : #ffffffa6);
+            clicked => {
+                Prof.screen = 0;
+                root.tab-clicked(i);
+            }
+        }
+    }
+
+    // Плеер, листнутый до верха, тянут пальцем вниз, чтобы свернуть.
+    player-swipe := SwipeGestureHandler {
+        enabled: player.open;
+        handle-swipe-down: player.at-top;
+        swiped => {
+            if self.current-position.y - self.pressed-position.y > 120px {
+                player.open = false;
+            }
+        }
+
+        player := Player {
+            width: root.width;
+            height: root.height;
+            dragging: player-swipe.swiping;
+            drag: player-swipe.swiping ? max(0px, player-swipe.current-position.y - player-swipe.pressed-position.y) : 0px;
+            open-menu => { menu.open = true; }
+            open-timer => { timer.open = true; }
+            open-quality => { quality.open = true; }
+        }
+    }
+    menu := MenuSheet {
+        width: root.width;
+        height: root.height;
+        lyrics => {
+            Now.lyrics-mode = true;
+            player.lyrics-full = true;
+        }
+        playlists => { player.show-playlists(); }
+    }
+    TrackSheet {
+        width: root.width;
+        height: root.height;
+    }
+    PickSheet {
+        width: root.width;
+        height: root.height;
+    }
+    ArtistsSheet {
+        width: root.width;
+        height: root.height;
+    }
+    quality := QualitySheet {
+        width: root.width;
+        height: root.height;
+    }
+    timer := TimerSheet {
+        width: root.width;
+        height: root.height;
+    }
+
+    if Prof.about-open: AboutPage {
+        width: root.width;
+        height: root.height;
+    }
+    LogoutSheet {
+        width: root.width;
+        height: root.height;
+    }
+
+    if Now.toast != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - (player.open ? 40px : root.page-bottom);
+        width: min(root.width - 32px, 560px);
+        height: max(48px, toast-text.preferred-height + 24px);
+        border-radius: 14px;
+        background: #333336;
+        toast-text := Text {
+            x: 16px;
+            width: parent.width - 32px;
+            text: Now.toast;
+            color: #fff;
+            font-size: 15px;
+            wrap: word-wrap;
+        }
+    }
+
+    // «Назад» закрывает то, что открыто сверху; если ничего, Android сворачивает приложение.
+    back := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(e) => {
+            if e.text != Key.Back {
+                return reject;
+            }
+            if Prof.logout-open {
+                Prof.logout-open = false;
+            } else if Prof.about-open {
+                Prof.about-open = false;
+            } else if Pages.pick-open {
+                Pages.pick-open = false;
+            } else if Pages.menu-open {
+                Pages.menu-open = false;
+            } else if Pages.viewer-open {
+                Pages.viewer-open = false;
+            } else if menu.open {
+                menu.open = false;
+            } else if quality.open {
+                quality.open = false;
+            } else if timer.open {
+                timer.open = false;
+            } else if player.lyrics-full {
+                player.lyrics-full = false;
+            } else if player.queue-open {
+                player.queue-open = false;
+            } else if player.open {
+                player.open = false;
+            } else if Prof.screen > 0 {
+                Prof.back();
+            } else if Pages.shown {
+                Pages.back();
+            } else {
+                return reject;
+            }
+            accept
+        }
+    }
+    forward-focus: back;
+
+    public function refocus() {
+        back.focus();
+    }
+}

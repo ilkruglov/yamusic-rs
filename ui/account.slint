@@ -1,12 +1,13 @@
 // Меню профиля (в стиле Яндекс ID), страница настроек и экран входа по коду.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, NavCircle, PillButton } from "widgets.slint";
+import { Icons, Icon, Cover, NavCircle, PillButton, ScrollBar } from "widgets.slint";
 import { T, App } from "state.slint";
 import { ComboBox } from "std-widgets.slint";
 
 // Меню профиля — окно Яндекс ID оригинала (iframe yandex.ru/user-id): 320 в ширину,
-// пункты 44, подменю языка и темы всплывают поверх. Иконки сняты с самого окна.
+// пункты 44, подменю языка и темы всплывают поверх. Иконки сняты с самого окна, цвета — из его
+// CSS: подсветка пунктов в тёмной теме белая (#fafaff 14% и 10%), а не серо-голубая.
 component IdRow inherits Rectangle {
     in property <image> icon;
     in property <string> text;
@@ -15,7 +16,7 @@ component IdRow inherits Rectangle {
     callback clicked;
     height: 44px;
     border-radius: 12px;
-    background: ta.has-hover || active ? #b4b8cc42 : transparent;
+    background: ta.has-hover || active ? (Theme.dark ? #fafaff24 : #b4b8cc42) : transparent;
     animate background { duration: App.motion ? 150ms : 0ms; }
     Image { x: 16px; width: 24px; height: 24px; source: icon; colorize: ink; }
     Text {
@@ -41,7 +42,7 @@ component PickRow inherits Rectangle {
     callback clicked;
     height: 48px;
     border-radius: 16px;
-    background: selected || ta.has-hover ? #b4b8cc33 : transparent;
+    background: selected || ta.has-hover ? (Theme.dark ? #fafaff1a : #b4b8cc33) : transparent;
     animate background { duration: App.motion ? 150ms : 0ms; }
     if code == "": Image { x: 20px; width: 24px; height: 24px; source: icon; colorize: ink; }
     if code != "": Text {
@@ -85,7 +86,10 @@ component Toggle inherits Rectangle {
 
 export component AccountMenu inherits Rectangle {
     property <color> ink: Theme.dark ? #ffffff : #262633;
-    property <brush> bg: Theme.dark ? #1f1f22 : #ffffff;
+    // Как в Яндекс ID: окно — surface-elevated-0, подменю — surface-elevated-100. В тёмной
+    // теме подменю светлее окна, иначе его край сливается с пунктами под ним.
+    property <brush> bg: Theme.dark ? #1f1f24 : #ffffff;
+    property <brush> bg-sub: Theme.dark ? #3a3a42 : #ffffff;
     property <string> lang-name: App.lang == "en" ? "English" : App.lang == "uz" ? "O‘zbek" : App.lang == "kk" ? "Қазақша" : "Русский";
 
     function act(id: string) {
@@ -195,7 +199,7 @@ export component AccountMenu inherits Rectangle {
             width: 296px;
             height: (App.translations ? 4 : 1) * 48px;
             border-radius: 20px;
-            background: bg;
+            background: bg-sub;
             drop-shadow-blur: 16px;
             drop-shadow-offset-y: 2px;
             drop-shadow-color: #00000033;
@@ -211,7 +215,7 @@ export component AccountMenu inherits Rectangle {
             width: 296px;
             height: 3 * 48px;
             border-radius: 20px;
-            background: bg;
+            background: bg-sub;
             drop-shadow-blur: 16px;
             drop-shadow-offset-y: 2px;
             drop-shadow-color: #00000033;
@@ -308,8 +312,63 @@ component ModeOption inherits Rectangle {
     }
 }
 
+// Карточка доната: градиент Плюса и белая кнопка, ведёт на CloudTips.
+component DonateCard inherits Rectangle {
+    callback clicked;
+    height: 88px;
+    border-radius: 16px;
+    background: ta.has-hover ? Theme.controls-color-plus-default-hovered : Theme.controls-color-plus-default-enabled;
+    Image {
+        x: 20px;
+        y: (parent.height - self.height) / 2;
+        width: 32px;
+        height: 32px;
+        source: Icons.liked-m;
+        colorize: #fff;
+    }
+    Text {
+        x: 68px;
+        y: 22px;
+        width: button.x - self.x - 12px;
+        text: T.t("Поддержать проект");
+        font-size: 16px;
+        font-weight: 700;
+        color: #fff;
+    }
+    Text {
+        x: 68px;
+        y: 46px;
+        width: button.x - self.x - 12px;
+        text: T.t("RS бесплатный и без рекламы");
+        overflow: elide;
+        font-size: 12px;
+        font-weight: 500;
+        color: #ffffffcc;
+    }
+    button := Rectangle {
+        x: parent.width - self.width - 20px;
+        y: (parent.height - self.height) / 2;
+        width: label.preferred-width + 32px;
+        height: 36px;
+        border-radius: 18px;
+        background: #fff;
+        label := Text {
+            x: 16px;
+            y: (parent.height - self.height) / 2;
+            text: T.t("Поддержать");
+            font-size: 14px;
+            font-weight: 700;
+            color: #1a1a1a;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 export component SettingsPage inherits Rectangle {
-    Flickable {
+    flick := Flickable {
         content-height: list.y + list.preferred-height + 40px;
         if App.can-back: NavCircle {
             x: 24px;
@@ -335,6 +394,7 @@ export component SettingsPage inherits Rectangle {
             spacing: 36px;
             alignment: start;
             SettingItem { title: T.t("Очистить память"); clicked => { App.setting("clear"); } }
+            SettingItem { title: T.t("Горячие клавиши"); clicked => { App.shortcuts-open = true; } }
             SettingItem {
                 title: T.t("Эквалайзер");
                 desc: App.eq-on ? T.t("Включен") : T.t("Выключен");
@@ -386,9 +446,37 @@ export component SettingsPage inherits Rectangle {
                 }
             }
             SettingItem {
+                title: T.t("Движение волны");
+                desc: T.t("Пятно «Моей волны» плавно вращается и дышит. Нагружает процессор");
+                toggle: true;
+                on: App.wave-motion;
+                clicked => { App.setting("wave-motion"); }
+            }
+            SettingItem {
+                title: T.t("Логарифмическая громкость");
+                desc: T.t("Громкость меняется ровнее на слух, тихие уровни настраиваются точнее");
+                toggle: true;
+                on: App.log-volume;
+                clicked => { App.setting("log-volume"); }
+            }
+            SettingItem {
+                title: T.t("Плавный переход между треками");
+                desc: T.t("Конец трека затихает, а следующий звучит поверх него");
+                toggle: true;
+                on: App.crossfade;
+                clicked => { App.setting("crossfade"); }
+            }
+            SettingItem {
                 title: T.t("Папка для скачивания");
                 desc: App.download-dir;
                 clicked => { App.setting("download-dir"); }
+            }
+            SettingItem {
+                title: T.t("Скачивать в FLAC");
+                desc: T.t("Без потерь, если у трека есть такая версия. Если нет, скачается MP3");
+                toggle: true;
+                on: App.download-flac;
+                clicked => { App.setting("download-flac"); }
             }
             if App.hidden-blocks != "": SettingItem {
                 title: T.t("Вернуть скрытые блоки");
@@ -428,12 +516,19 @@ export component SettingsPage inherits Rectangle {
                 desc: App.login;
                 clicked => { App.setting("logout"); }
             }
+            DonateCard {
+                clicked => { App.setting("donate"); }
+            }
             SettingItem {
                 title: T.t("О приложении");
                 desc: App.app-name + " · " + T.t("Версия ") + App.version;
                 clicked => { App.setting("about"); }
             }
         }
+    }
+    ScrollBar {
+        content-y <=> flick.content-y;
+        content-height: flick.content-height;
     }
 }
 

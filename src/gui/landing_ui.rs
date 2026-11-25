@@ -468,6 +468,7 @@ impl Ctx {
         let (kind, arg) = target.split_once(':').unwrap_or((target, ""));
         match kind {
             "likes" => self.navigate(Page::List, Some("likes".into()), true),
+            "history" => self.navigate(Page::History, None, true),
             "station" => {
                 let src = if arg == crate::api::WAVE { Source::Wave } else { Source::Seed { station: arg.to_string(), header: "Моя волна".into(), title: title.to_string() } };
                 self.player.send(Cmd::Wave(src));
@@ -562,6 +563,13 @@ impl Ctx {
         if let Some(t) = &blk.target {
             return self.open_target(t, &def.title);
         }
+        // Новые релизы — как у оригинала: «Смотреть всё» берёт их из `entities` блока (до 100, с обложками
+        // альбомов). В самом блоке их всего восемь, и на обложке там фото исполнителя.
+        if matches!(def.kind.as_str(), "NEW_RELEASES" | "EDITORIAL_NEW_RELEASES") {
+            let key = format!("entities:{}", def.id);
+            self.st.borrow_mut().grid_titles.insert(key.clone(), def.title.clone());
+            return self.navigate(Page::Grid, Some(key), true);
+        }
         // «Смотреть всё»: карточки блока сеткой.
         let cards: Vec<Card> = LS.with(|l| l.borrow().cards.get(b).cloned()).unwrap_or_default()
             .into_iter()
@@ -584,16 +592,6 @@ impl Ctx {
     fn landing_like(self: &Rc<Self>, b: usize, i: usize) {
         let Some(t) = self.landing_track(&format!("L{b}"), i) else { return };
         self.like(t);
-        let Some(model) = LS.with(|l| l.borrow().model.clone()) else { return };
-        let Some(row) = model.row_data(b) else { return };
-        if let Some(mut r) = row.tracks.row_data(i) {
-            r.liked = !r.liked;
-            row.tracks.set_row_data(i, r);
-        }
-        if let Some(mut r) = row.chart.row_data(i) {
-            r.item.liked = !r.item.liked;
-            row.chart.set_row_data(i, r);
-        }
     }
 
     // ---------- чарт ----------
@@ -703,11 +701,6 @@ pub(super) fn register(app: &App) {
         with_ctx(|c| {
             let Some(t) = LS.with(|l| l.borrow().chart_tracks.get(i.max(0) as usize).cloned()) else { return };
             c.like(t);
-            let m = c.ui().global::<App>().get_chart_rows();
-            if let Some(mut r) = m.row_data(i as usize) {
-                r.item.liked = !r.item.liked;
-                m.set_row_data(i as usize, r);
-            }
         })
     });
 }

@@ -1,0 +1,882 @@
+// Профиль, настройки и «О приложении», сняты с мобильного клиента.
+
+import { Icons, Now, Sheet, QualityOption, T } from "common.slint";
+
+export global Prof {
+    // 0 закрыт, 1 профиль, 2 настройки, 3 качество звука, 4 эквалайзер.
+    in-out property <int> screen;
+    in-out property <bool> about-open;
+    in-out property <bool> logout-open;
+    in property <string> name;
+    in property <string> login;
+    in property <image> avatar;
+    in property <image> theme-system;
+    in property <image> theme-light;
+    in property <image> theme-dark;
+    // 0 системная, 1 светлая, 2 тёмная.
+    in-out property <int> theme;
+    in-out property <bool> kids;
+    in-out property <bool> less-ai;
+    in-out property <bool> to-end;
+    in-out property <bool> wave-motion;
+    in-out property <bool> crossfade;
+    in-out property <bool> updates;
+    in-out property <bool> eq-on;
+    in-out property <int> eq-preset;
+    in property <[string]> eq-presets;
+    in-out property <[float]> eq-gains;
+    in property <string> version;
+    in property <string> update;
+    callback changed();
+    callback less-ai-changed();
+    callback eq-changed();
+    callback eq-band(int, float);
+    callback eq-pick(int);
+    callback link(string);
+    callback logout();
+
+    public function back() {
+        if root.screen >= 3 {
+            root.screen = 2;
+        } else {
+            root.screen -= 1;
+        }
+    }
+}
+
+component BackArrow inherits Rectangle {
+    callback clicked();
+    width: 48px;
+    height: 48px;
+    Path {
+        width: 24px;
+        height: 24px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: T.fg;
+        stroke-width: 2px;
+        commands: "M20 12H4 M10 5l-7 7 7 7";
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component ToolIcon inherits Rectangle {
+    in property <image> icon;
+    callback clicked();
+    width: 48px;
+    height: 48px;
+    Image {
+        width: 24px;
+        height: 24px;
+        source: root.icon;
+        colorize: T.fg;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component Chevron inherits Path {
+    width: 24px;
+    height: 24px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: T.fg.with-alpha(0.30);
+    stroke-width: 2px;
+    commands: "M9.5 5.5l6.5 6.5-6.5 6.5";
+}
+
+component Toggle inherits Rectangle {
+    in property <bool> on;
+    width: 52px;
+    height: 32px;
+    border-radius: 16px;
+    background: root.on ? T.strong : T.bg;
+    border-width: root.on ? 0 : 2.5px;
+    border-color: T.strong;
+    Rectangle {
+        x: root.on ? root.width - 28px : 7.6px;
+        width: root.on ? 24px : 16.8px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.on ? T.bg : T.strong;
+        animate x, width { duration: 150ms; }
+    }
+}
+
+// Справа: 0 стрелка, 1 переключатель, 2 внешняя ссылка.
+component SetRow inherits Rectangle {
+    in property <Icons> icons;
+    in property <string> title;
+    in property <string> text;
+    in property <int> kind;
+    in property <bool> on;
+    callback clicked();
+    height: max(56px, lay.preferred-height + 36px);
+    lay := VerticalLayout {
+        x: 16px;
+        y: (root.height - self.preferred-height) / 2;
+        width: root.width - (root.kind == 1 ? 100px : 72px);
+        height: self.preferred-height;
+        Text {
+            text: root.title;
+            color: T.fg;
+            font-size: 17px;
+            wrap: word-wrap;
+        }
+        if root.text != "": Text {
+            text: root.text;
+            color: T.fg.with-alpha(0.48);
+            font-size: 15px;
+            wrap: word-wrap;
+        }
+    }
+    if root.kind == 1: Toggle {
+        x: root.width - 16px - self.width;
+        on: root.on;
+    }
+    if root.kind == 0: Chevron {
+        x: root.width - 34px;
+    }
+    if root.kind == 2: Image {
+        x: root.width - 41px;
+        width: 24px;
+        height: 24px;
+        source: root.icons.open;
+        colorize: T.fg.with-alpha(0.30);
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component Section inherits Text {
+    height: 72px;
+    vertical-alignment: bottom;
+    x: 16px;
+    color: T.fg;
+    font-family: T.display-font;
+    font-weight: 800;
+    font-size: 24px;
+}
+
+component ThemeCard inherits Rectangle {
+    in property <image> picture;
+    // 0 системная, 1 светлая, 2 тёмная.
+    in property <int> mode;
+    in property <string> title;
+    in property <bool> selected;
+    callback clicked();
+    height: 116px;
+    border-radius: 14px;
+    background: T.card;
+    border-width: root.selected ? 2.6px : 0;
+    border-color: T.strong;
+    Image {
+        y: 16px;
+        width: 64px;
+        height: 60px;
+        source: root.picture;
+        image-fit: contain;
+    }
+    // Без оригинала картинок нет: рисуем телефон сами. У системной темы он наполовину светлый.
+    if root.picture.width == 0: Rectangle {
+        y: 14px;
+        width: 38px;
+        height: 64px;
+        border-radius: 7px;
+        border-width: 1.5px;
+        border-color: #808080;
+        clip: true;
+        Rectangle {
+            x: 0;
+            width: root.mode == 1 ? parent.width : root.mode == 2 ? 0 : parent.width / 2;
+            background: #f2f2f2;
+        }
+        Rectangle {
+            x: root.mode == 2 ? 0 : root.mode == 1 ? parent.width : parent.width / 2;
+            width: parent.width - self.x;
+            background: #141414;
+        }
+        Rectangle {
+            x: 6px;
+            y: 10px;
+            width: 26px;
+            height: 26px;
+            border-radius: 13px;
+            background: #ff0;
+        }
+        for i in 2: Rectangle {
+            x: 6px;
+            y: 43px + i * 7px;
+            width: i == 0 ? 26px : 18px;
+            height: 3px;
+            border-radius: 1.5px;
+            background: #8080807f;
+        }
+    }
+    Text {
+        y: 83px;
+        text: root.title;
+        color: T.fg;
+        font-size: 17px;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component MenuRow inherits Rectangle {
+    in property <Icons> icons;
+    in property <string> title;
+    in property <bool> last;
+    callback clicked();
+    height: 56px;
+    Text {
+        x: 16px;
+        text: root.title;
+        color: T.fg;
+        font-size: 17px;
+    }
+    Chevron {
+        x: root.width - 52px;
+    }
+    if !root.last: Rectangle {
+        y: root.height - 1px;
+        height: 1px;
+        background: T.line;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component EqSlider inherits Rectangle {
+    in property <float> value;
+    in property <bool> enabled;
+    callback changed(float);
+    property <float> k: (root.value + 12) / 24;
+    width: 28px;
+    Rectangle {
+        y: 8px;
+        width: 4px;
+        height: root.height - 16px;
+        border-radius: 2px;
+        background: T.fg.with-alpha(0.10);
+    }
+    Rectangle {
+        y: 8px + (1 - root.k) * (root.height - 16px) - 8px;
+        width: 22px;
+        height: 22px;
+        border-radius: 11px;
+        background: root.enabled ? T.strong : T.fg.with-alpha(0.30);
+    }
+    TouchArea {
+        enabled: root.enabled;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.changed(-12 + (1 - max(0, min(1, (self.mouse-y - 8px) / (root.height - 16px)))) * 24);
+            }
+        }
+        moved => {
+            root.changed(-12 + (1 - max(0, min(1, (self.mouse-y - 8px) / (root.height - 16px)))) * 24);
+        }
+    }
+}
+
+// Экран с крупным заголовком, который при прокрутке уходит в шапку.
+component Screen inherits Rectangle {
+    in property <string> title;
+    in property <length> bottom;
+    in property <length> content-height;
+    callback back();
+    background: T.bg;
+    TouchArea { }
+    flick := Flickable {
+        y: 100px;
+        height: root.height - self.y;
+        content-width: self.width;
+        content-height: root.content-height + 46px + root.bottom;
+        Text {
+            x: 16px;
+            y: 6px;
+            text: root.title;
+            color: T.fg;
+            font-family: T.display-font;
+            font-weight: 800;
+            font-size: 30px;
+        }
+        Rectangle {
+            y: 46px;
+            height: root.content-height;
+            @children
+        }
+    }
+    Rectangle {
+        y: 0;
+        height: 100px;
+        background: T.bg;
+    }
+    BackArrow {
+        x: 4px;
+        y: 48px;
+        clicked => { root.back(); }
+    }
+    if -flick.content-y > 40px: Text {
+        x: 56px;
+        y: 44px;
+        height: 56px;
+        text: root.title;
+        color: T.fg;
+        font-family: T.display-font;
+        font-weight: 800;
+        font-size: 22px;
+        vertical-alignment: center;
+    }
+}
+
+component ProfilePage inherits Rectangle {
+    in property <Icons> icons;
+    in property <length> bottom;
+    background: T.bg;
+    TouchArea { }
+    BackArrow {
+        x: 4px;
+        y: 48px;
+        clicked => { Prof.back(); }
+    }
+    Text {
+        x: 72px;
+        y: 44px;
+        height: 56px;
+        text: "Профиль";
+        color: T.fg;
+        font-weight: 700;
+        font-size: 22px;
+        vertical-alignment: center;
+    }
+    ToolIcon {
+        x: root.width - 96px;
+        y: 48px;
+        icon: root.icons.sound;
+        clicked => { Prof.screen = 2; }
+    }
+    ToolIcon {
+        x: root.width - 48px;
+        y: 48px;
+        icon: root.icons.logout;
+        clicked => { Prof.logout-open = true; }
+    }
+    profile-scroll := Flickable {
+        x: (root.width - self.width) / 2;
+        y: 100px;
+        width: min(root.width, 680px);
+        height: max(0px, root.height - self.y - root.bottom);
+        content-width: self.width;
+        content-height: 372px;
+        Rectangle {
+            y: 0px;
+            height: 112px;
+            background: @linear-gradient(160deg, #172430 0%, #1f1a28 55%, #210d17 100%);
+            Rectangle {
+                x: 21.7px;
+                width: 62.5px;
+                height: 62.5px;
+                border-radius: self.width / 2;
+                background: @linear-gradient(90deg, #fd5a53 0%, #b04aa0 50%, #4c60f7 100%);
+                Rectangle {
+                    width: 57px;
+                    height: 57px;
+                    border-radius: self.width / 2;
+                    background: #000;
+                }
+                Rectangle {
+                    width: 53.7px;
+                    height: 53.7px;
+                    border-radius: self.width / 2;
+                    clip: true;
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: Prof.avatar;
+                        image-fit: cover;
+                    }
+                }
+            }
+            Text {
+                x: 102px;
+                y: 34px;
+                width: profile-scroll.width - 118px;
+                text: Prof.name;
+                color: #fff;
+                font-size: 22px;
+                font-weight: 700;
+                overflow: elide;
+            }
+            Text {
+                x: 102px;
+                y: 60px;
+                width: profile-scroll.width - 118px;
+                text: Prof.login;
+                color: #ffffffcc;
+                font-size: 16px;
+                overflow: elide;
+            }
+        }
+        Rectangle {
+            x: 16px;
+            y: 128px;
+            width: profile-scroll.width - 32px;
+            height: 4 * 56px;
+            border-radius: 14px;
+            background: T.card;
+            VerticalLayout {
+                MenuRow {
+                    icons: root.icons;
+                    title: "Управлять подпиской";
+                    clicked => { Prof.link("plus"); }
+                }
+                MenuRow {
+                    icons: root.icons;
+                    title: "Написать в поддержку";
+                    clicked => { Prof.link("support"); }
+                }
+                MenuRow {
+                    icons: root.icons;
+                    title: "Настройки";
+                    clicked => { Prof.screen = 2; }
+                }
+                MenuRow {
+                    icons: root.icons;
+                    title: "Изменить портрет и имя";
+                    last: true;
+                    clicked => { Prof.link("account"); }
+                }
+            }
+        }
+    }
+}
+
+component SettingsPage inherits Screen {
+    in property <Icons> icons;
+    title: "Настройки";
+    back => { Prof.back(); }
+    content-height: col.preferred-height;
+    col := VerticalLayout {
+        alignment: start;
+        Section { text: "Звук и управление"; }
+        SetRow {
+            icons: root.icons;
+            title: "Качество звука";
+            text: ["Автоматическое", "Превосходное", "Оптимальное", "Экономичное"][Now.quality];
+            clicked => { Prof.screen = 3; }
+        }
+        SetRow {
+            icons: root.icons;
+            title: "Эквалайзер";
+            text: Prof.eq-on ? Prof.eq-presets[Prof.eq-preset] : "Выключен";
+            clicked => { Prof.screen = 4; }
+        }
+        SetRow {
+            icons: root.icons;
+            title: "Меньше ИИ";
+            text: "В рекомендациях будет реже встречаться музыка, созданная с помощью ИИ";
+            kind: 1;
+            on: Prof.less-ai;
+            clicked => {
+                Prof.less-ai = !Prof.less-ai;
+                Prof.less-ai-changed();
+            }
+        }
+        Section { text: "Детский контент"; }
+        SetRow {
+            icons: root.icons;
+            title: "Ограничить контент для детей";
+            text: "Музыка, подкасты и книги с пометкой 18+ не будут включаться";
+            kind: 1;
+            on: Prof.kids;
+            clicked => {
+                Prof.kids = !Prof.kids;
+                Prof.changed();
+            }
+        }
+        Section { text: "Тема оформления"; }
+        Rectangle {
+            height: 132px;
+            HorizontalLayout {
+                y: 16px;
+                height: 116px;
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 8.4px;
+                ThemeCard {
+                    picture: Prof.theme-system;
+                    mode: 0;
+                    title: "Системная";
+                    selected: Prof.theme == 0;
+                    clicked => {
+                        Prof.theme = 0;
+                        Prof.changed();
+                    }
+                }
+                ThemeCard {
+                    picture: Prof.theme-light;
+                    mode: 1;
+                    title: "Светлая";
+                    selected: Prof.theme == 1;
+                    clicked => {
+                        Prof.theme = 1;
+                        Prof.changed();
+                    }
+                }
+                ThemeCard {
+                    picture: Prof.theme-dark;
+                    mode: 2;
+                    title: "Тёмная";
+                    selected: Prof.theme == 2;
+                    clicked => {
+                        Prof.theme = 2;
+                        Prof.changed();
+                    }
+                }
+            }
+        }
+        SetRow {
+            icons: root.icons;
+            title: "Движение волны";
+            text: "Фон «Моей волны» плавно переливается. Расходует больше заряда";
+            kind: 1;
+            on: Prof.wave-motion;
+            clicked => {
+                Prof.wave-motion = !Prof.wave-motion;
+                Prof.changed();
+            }
+        }
+        Rectangle { height: 19px; }
+        Section { text: "Коллекция"; }
+        SetRow {
+            icons: root.icons;
+            title: "Добавлять треки в конец плейлиста";
+            kind: 1;
+            on: Prof.to-end;
+            clicked => {
+                Prof.to-end = !Prof.to-end;
+                Prof.changed();
+            }
+        }
+        Section { text: "Воспроизведение"; }
+        SetRow {
+            icons: root.icons;
+            title: "Плавный переход между треками";
+            text: "Конец трека затихает, а следующий звучит поверх него";
+            kind: 1;
+            on: Prof.crossfade;
+            clicked => {
+                Prof.crossfade = !Prof.crossfade;
+                Prof.changed();
+            }
+        }
+        Section { text: "Помощь и обратная связь"; }
+        SetRow {
+            icons: root.icons;
+            title: "Сообщать о новинках";
+            text: "Напомним, когда выйдет новая версия приложения";
+            kind: 1;
+            on: Prof.updates;
+            clicked => {
+                Prof.updates = !Prof.updates;
+                Prof.changed();
+            }
+        }
+        SetRow {
+            icons: root.icons;
+            title: "О приложении";
+            text: Prof.update != "" ? "Доступна версия " + Prof.update : "Версия " + Prof.version;
+            clicked => { Prof.about-open = true; }
+        }
+        SetRow {
+            icons: root.icons;
+            title: "Поддержать проект";
+            text: "RS бесплатный и без рекламы";
+            clicked => { Prof.link("donate"); }
+        }
+        SetRow {
+            icons: root.icons;
+            title: "Справка";
+            kind: 2;
+            clicked => { Prof.link("help"); }
+        }
+    }
+}
+
+component QualityPage inherits Screen {
+    title: "Качество звука";
+    back => { Prof.back(); }
+    content-height: 420px;
+    QualityOption {
+        y: 16px;
+        height: 88px;
+        title: "Автоматическое";
+        text: "Звук автоматически подстраивается под текущее качество вашей сети";
+        checked: Now.quality == 0;
+        clicked => { Now.set-quality(0); }
+    }
+    QualityOption {
+        y: 120px;
+        height: 105px;
+        title: "Превосходное";
+        text: "Музыка в lossless и других высококачественных форматах — для безлимитного интернета и хорошей акустики";
+        checked: Now.quality == 1;
+        clicked => { Now.set-quality(1); }
+    }
+    QualityOption {
+        y: 225px;
+        height: 88px;
+        title: "Оптимальное";
+        text: "Сбалансированный звук для большинства устройств, со средним расходом трафика";
+        checked: Now.quality == 2;
+        clicked => { Now.set-quality(2); }
+    }
+    QualityOption {
+        y: 313px;
+        height: 88px;
+        title: "Экономичное";
+        text: "Для медленного интернета, с минимальным расходом трафика";
+        checked: Now.quality == 3;
+        clicked => { Now.set-quality(3); }
+    }
+}
+
+component EqPage inherits Screen {
+    in property <Icons> icons;
+    title: "Эквалайзер";
+    back => { Prof.back(); }
+    content-height: 56px + 60px + 300px;
+    SetRow {
+        y: 0;
+        icons: root.icons;
+        title: "Включить эквалайзер";
+        kind: 1;
+        on: Prof.eq-on;
+        clicked => {
+            Prof.eq-on = !Prof.eq-on;
+            Prof.eq-changed();
+        }
+    }
+    Flickable {
+        y: 68px;
+        height: 40px;
+        content-width: chips.preferred-width;
+        chips := HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
+            spacing: 8px;
+            for p[i] in Prof.eq-presets: Rectangle {
+                width: label.preferred-width + 32px;
+                border-radius: 20px;
+                background: Prof.eq-preset == i ? T.strong : T.card;
+                label := Text {
+                    text: p;
+                    color: Prof.eq-preset == i ? T.bg : T.fg;
+                    font-size: 15px;
+                }
+                TouchArea {
+                    clicked => { Prof.eq-pick(i); }
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        x: 16px;
+        y: 132px;
+        width: root.width - 32px;
+        height: 270px;
+        alignment: space-between;
+        for g[i] in Prof.eq-gains: VerticalLayout {
+            spacing: 6px;
+            EqSlider {
+                value: g;
+                enabled: Prof.eq-on;
+                changed(v) => { Prof.eq-band(i, v); }
+            }
+            Text {
+                text: ["60", "170", "310", "600", "1K", "3K", "6K", "12K", "14K", "16K"][i];
+                color: T.fg.with-alpha(0.48);
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+        }
+    }
+}
+
+export component ProfileScreens inherits Rectangle {
+    in property <Icons> icons;
+    in property <length> bottom;
+    if Prof.screen == 1: ProfilePage {
+        icons: root.icons;
+        bottom: root.bottom;
+    }
+    if Prof.screen == 2: SettingsPage {
+        icons: root.icons;
+        bottom: root.bottom;
+    }
+    if Prof.screen == 3: QualityPage {
+        bottom: root.bottom;
+    }
+    if Prof.screen == 4: EqPage {
+        icons: root.icons;
+        bottom: root.bottom;
+    }
+}
+
+component AboutLink inherits Rectangle {
+    in property <string> title;
+    callback clicked();
+    height: 57px;
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: T.line;
+    }
+    Text {
+        text: root.title;
+        color: T.fg;
+        font-size: 17px;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component AboutPage inherits Rectangle {
+    background: T.bg;
+    TouchArea { }
+    BackArrow {
+        x: 4px;
+        y: 48px;
+        clicked => { Prof.about-open = false; }
+    }
+    Text {
+        x: 16px;
+        y: 106px;
+        text: "О приложении";
+        color: T.fg;
+        font-family: T.display-font;
+        font-weight: 800;
+        font-size: 30px;
+    }
+    VerticalLayout {
+        y: root.height - self.preferred-height - 24px;
+        height: self.preferred-height;
+        Text {
+            text: "Яндекс Музыка RS " + Prof.version + (Prof.update != "" ? "\nДоступна версия " + Prof.update : "");
+            color: T.fg.with-alpha(0.48);
+            font-size: 15px;
+            horizontal-alignment: center;
+            TouchArea {
+                clicked => { Prof.link("update"); }
+            }
+        }
+        Rectangle { height: 16px; }
+        AboutLink {
+            title: "Лицензионное соглашение";
+            clicked => { Prof.link("terms"); }
+        }
+        AboutLink {
+            title: "Сторонние компоненты";
+            clicked => { Prof.link("components"); }
+        }
+        AboutLink {
+            title: "Политика конфиденциальности";
+            clicked => { Prof.link("privacy"); }
+        }
+        AboutLink {
+            title: "Правила рекомендаций";
+            clicked => { Prof.link("recommendations"); }
+        }
+        Rectangle {
+            height: 1px;
+            background: T.line;
+        }
+        Rectangle {
+            height: 80px;
+            Text {
+                width: parent.width - 32px;
+                text: "Сервис Яндекс Музыка может содержать информацию, не предназначенную для несовершеннолетних";
+                color: T.fg.with-alpha(0.48);
+                font-size: 15px;
+                wrap: word-wrap;
+                horizontal-alignment: center;
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: T.line;
+        }
+        Text {
+            height: 72px;
+            text: "Неофициальный клиент Яндекс Музыки\ngithub.com/SpolzerMod/yamusic-rs";
+            color: T.fg.with-alpha(0.48);
+            font-size: 15px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            TouchArea {
+                clicked => { Prof.link("components"); }
+            }
+        }
+    }
+}
+
+export component LogoutSheet inherits Sheet {
+    panel-height: 260px;
+    panel-color: T.dark ? #141414 : #fff;
+    open <=> Prof.logout-open;
+    Text {
+        y: 48px;
+        width: parent.width;
+        text: "Точно выйти из аккаунта?";
+        color: T.fg;
+        font-size: 24px;
+        font-weight: 700;
+        horizontal-alignment: center;
+    }
+    Rectangle {
+        x: 16px;
+        y: 116px;
+        width: parent.width - 32px;
+        height: 50px;
+        border-radius: 25px;
+        background: T.dark ? #fff : #2a2a33;
+        Text {
+            text: "Выйти";
+            color: T.dark ? #000 : #fff;
+            font-size: 17px;
+            font-weight: 500;
+        }
+        TouchArea {
+            clicked => {
+                Prof.logout-open = false;
+                Prof.logout();
+            }
+        }
+    }
+    Rectangle {
+        x: 16px;
+        y: 180px;
+        width: parent.width - 32px;
+        height: 50px;
+        border-radius: 25px;
+        background: T.card;
+        Text {
+            text: "Отмена";
+            color: T.fg;
+            font-size: 17px;
+            font-weight: 500;
+        }
+        TouchArea {
+            clicked => { Prof.logout-open = false; }
+        }
+    }
+}

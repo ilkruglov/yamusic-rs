@@ -8,6 +8,8 @@
 
 ![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-2b2b30?labelColor=1c1c1f)
 ![Linux бета](https://img.shields.io/badge/Linux-%D0%B1%D0%B5%D1%82%D0%B0-2b2b30?labelColor=1c1c1f)
+![Android бета](https://img.shields.io/badge/Android-%D0%B1%D0%B5%D1%82%D0%B0-2b2b30?labelColor=1c1c1f)
+[![Поддержать](https://img.shields.io/badge/%D0%BF%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C-CloudTips-ffd60a?labelColor=1c1c1f)](https://pay.cloudtips.ru/p/befb620d)
 [![GPL-3.0](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-GPL--3.0-2b2b30?labelColor=1c1c1f)](LICENSE)
 
 [Собрать Windows-версию](#сборка) ·
@@ -33,7 +35,7 @@
 семь процессов и около 850 МБ памяти. **Яндекс Музыка RS** повторяет его интерфейс (те же
 шрифты, цвета, отступы и страницы), но написана на Rust и рисует окно сама, на процессоре.
 В итоге один файл на 26 МБ, один процесс и около 65 МБ памяти. Работает на Windows, а в бете
-и на Linux.
+на Linux и Android.
 
 <div align="center">
 <img src="docs/stats.gif" width="100%" alt="Оперативная память: 852 МБ против 64 МБ. Процессы: 7 против 1. Размер на диске: 356 МБ против 26 МБ">
@@ -125,6 +127,8 @@
 | Fedora, openSUSE | `yamusic-rs-<версия>-1.x86_64.rpm` | `sudo dnf install ./yamusic-rs-*.rpm` или `sudo zypper install ./yamusic-rs-*.rpm` |
 | Любая другая, в том числе Arch | `yamusic-rs-x86_64.AppImage` | `chmod +x yamusic-rs-x86_64.AppImage` и запустить |
 
+Для ARM (Raspberry Pi 4/5, Asahi Linux на Mac с M1/M2 и т. п.) те же файлы с `arm64`/`aarch64` в имени.
+
 AppImage монтирует себя через FUSE. Если пишет `Cannot mount AppImage`, поставьте пакет `fuse3`
 или запускайте с распаковкой: `APPIMAGE_EXTRACT_AND_RUN=1 ./yamusic-rs-x86_64.AppImage`.
 
@@ -139,6 +143,22 @@ AppImage монтирует себя через FUSE. Если пишет `Canno
 и вход лежат в `~/.config/yamusic-rs`, кэш в `~/.cache/yamusic-rs`, токен в связке ключей под
 именем «Яндекс Музыка RS» (его можно удалить в «Паролях и ключах» или в KWallet).
 
+### Android (бета)
+
+1. Скачайте `yamusic-rs-arm64-v8a.apk` со страницы [последнего релиза](https://github.com/SpolzerMod/yamusic-rs/releases/latest)
+   прямо на телефон.
+2. Откройте файл. Android попросит разрешить установку из этого источника (браузера или
+   файлового менеджера): разрешите и установите.
+3. Вход такой же, по коду: откройте [ya.ru/device](https://ya.ru/device) на любом устройстве и введите
+   код с экрана.
+
+Нужен Android 8 или новее на 64-битном процессоре, то есть почти любой телефон последних лет.
+APK весит около 11 МБ. Играет в фоне, управляется из шторки и с экрана блокировки, скачанные
+треки кладёт в `Музыка/Яндекс Музыка`.
+
+**Обновление.** В профиле появится «Доступна версия …». Кнопка скачает новый APK, его нужно
+открыть и установить поверх, вход и настройки сохранятся.
+
 ## Какие системы поддерживаются
 
 | Система | Состояние |
@@ -148,6 +168,8 @@ AppImage монтирует себя через FUSE. Если пишет `Canno
 | Windows на ARM | Должна запускаться через эмуляцию x64. Не проверялась. |
 | Windows 7 и 8.1 | Не поддерживаются: текущий Rust под них не собирает. |
 | **Linux** x86_64 | Бета. Нужна glibc 2.35 или новее: Ubuntu 22.04+, Debian 12+, Mint 21+, Fedora, openSUSE, Arch и другие. Проверено на Ubuntu 22.04, Debian 13, Fedora 45 и Arch, в Wayland и X11. Звук через PipeWire, PulseAudio или ALSA. Медиаклавиши и плеер в панели GNOME и KDE работают через MPRIS. Трея пока нет, поэтому закрытие окна закрывает приложение. О проблемах пишите в [issues](https://github.com/SpolzerMod/yamusic-rs/issues). |
+| **Linux** ARM64 | Бета, те же условия, что для x86_64. Проверено на ALT Linux (Asahi) на MacBook Pro M1. |
+| **Android** 8+ arm64 | Бета. Проверено на эмуляторе с Android 15. Шрифты и иконки берутся из установленной Яндекс Музыки, без неё скачиваются с music.yandex.ru. |
 | macOS | Не поддерживается. Есть сторонний порт: [rnikitin/yamusic-rs](https://github.com/rnikitin/yamusic-rs), сборка для Apple Silicon и Intel лежит в его [релизах](https://github.com/rnikitin/yamusic-rs/releases). |
 
 > Порт под macOS — отдельный проект. Он основан на коде этого репозитория, но ведётся независимо:
@@ -263,6 +285,11 @@ API Яндекса неофициальный и может меняться б�
 </details>
 
 ## Как помочь
+
+### Поддержать рублём
+
+RS бесплатный и без рекламы. Если он вам пригодился, можно закинуть на развитие через
+[CloudTips](https://pay.cloudtips.ru/p/befb620d), от 49 ₽. Деньги пойдут на RS и следующие открытые проекты.
 
 ### Сообщить об ошибке
 
@@ -445,7 +472,7 @@ Copyright © 2026 Spolzer. Код распространяется по лице
 
 ## English
 
-**Yandex Music RS** is an unofficial Yandex Music client for Windows and Linux written in Rust.
+**Yandex Music RS** is an unofficial Yandex Music client for Windows, Linux and Android written in Rust.
 It mirrors the official desktop app closely (same fonts, colours, layout and pages), but instead
 of Electron it is a single 26 MB executable that renders its window on the CPU with Slint and Skia.
 Running the same scenario, the official app uses about 850 MB of RAM across 7 processes, and RS
@@ -458,6 +485,9 @@ uses about 65 MB in one process.
   and an AppImage for everything else; a [`PKGBUILD`](packaging/aur/PKGBUILD) is available for Arch.
   Needs glibc 2.35 or newer. Sound goes through PipeWire, PulseAudio or ALSA, media keys and
   the GNOME/KDE player widget work via MPRIS. There is no tray icon yet.
+  ARM64 builds (`aarch64`/`arm64` in the file name) are there too.
+- **Android (beta):** install `yamusic-rs-arm64-v8a.apk` from the latest release on Android 8+
+  (64-bit). Plays in the background and from the notification shade and lock screen.
 - **Requirements:** Windows 11 (Windows 10 should work but is not tested regularly) or Linux, a Yandex
   account, and Yandex Plus for full-length tracks. macOS is not supported.
 - **macOS port:** a third-party port is available at [rnikitin/yamusic-rs](https://github.com/rnikitin/yamusic-rs).
@@ -473,6 +503,7 @@ uses about 65 MB in one process.
   `%APPDATA%\yamusic-rs\log.txt` (`~/.config/yamusic-rs/log.txt` on Linux). Security
   problems go to [Report a vulnerability](https://github.com/SpolzerMod/yamusic-rs/security/advisories/new),
   not to public issues.
+- **Support:** if the app is useful to you, you can [send a tip via CloudTips](https://pay.cloudtips.ru/p/befb620d).
 
 The code is released under the [GNU GPL v3](LICENSE): forks you distribute must stay open source
 under the same license. This project is not affiliated with or endorsed by Yandex. All trademarks

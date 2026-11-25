@@ -1,0 +1,50 @@
+[package]
+name = "yamusic-rs-android"
+version = "1.1.6"
+edition = "2021"
+rust-version = "1.92"
+license = "GPL-3.0-only"
+repository = "https://github.com/SpolzerMod/yamusic-rs"
+publish = false
+
+# Общий код (API, вход, плеер) берётся из ../src через #[path], своего у Android только окно и sys.
+[lib]
+name = "yamusic"
+crate-type = ["cdylib"]
+
+[dependencies]
+# На Android Slint рисует только через Skia на OpenGL, как и в десктопе с YML_RENDERER=skia-opengl.
+slint = { version = "~1.18", default-features = false, features = ["std", "compat-1-2", "backend-android-activity-06", "unstable-fontique-011"] }
+rodio = { version = "0.20", default-features = false, features = ["symphonia-mp3", "symphonia-aac", "symphonia-isomp4"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip"] }
+tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+md-5 = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+miniz_oxide = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+jni = "0.21"
+glow = "0.16"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+slint-build = "~1.18"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Для проверок в эмуляторе: без LTO сборка в разы быстрее.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16

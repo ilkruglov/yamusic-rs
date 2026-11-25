@@ -6,7 +6,7 @@ import { App, TrackItem, ChartRow } from "state.slint";
 
 // Строка трека: обложка 40, название и исполнитель 14/500, лайк 40 и длительность справа.
 // По краям отступ 8px внутри подсветки, как padding-inline у CommonTrack оригинала.
-export component TrackRow inherits Rectangle {
+export component TrackRow inherits TouchArea {
     in property <TrackItem> item;
     in property <bool> current;
     // Откуда строка и её номер: по ним Rust находит трек для ссылок на альбом и исполнителя.
@@ -18,24 +18,49 @@ export component TrackRow inherits Rectangle {
     callback like();
     callback remove();
     height: 56px;
-    border-radius: Theme.radius-size-m;
-    // При наведении вместо длительности — «…» с меню трека, как в оригинале.
-    out property <bool> hot: ta.has-hover || like-ta.has-hover || more-ta.has-hover || bucket-ta.has-hover;
-    background: current || hot ? Theme.controls-color-secondary-default-disabled : transparent;
-    ta := TouchArea {
-        mouse-cursor: MouseCursor.pointer;
-        clicked => { root.play(); }
+    in property <bool> hot: root.has-hover;
+    property <float> hover-progress: hot ? 1 : 0;
+    animate hover-progress { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+    property <float> emphasis: current || hot ? 1 : 0;
+    animate emphasis { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+    in property <color> background: Theme.surface-color-primary-enabled-list;
+    mouse-cursor: MouseCursor.pointer;
+    clicked => { root.play(); }
+    Rectangle {
+        border-radius: Theme.radius-size-s;
+        background: root.background.transparentize(1 - root.emphasis);
     }
     Cover {
         x: 8px;
         y: 8px;
         width: 40px;
         height: 40px;
-        radius: Theme.radius-size-s;
+        radius: Theme.radius-size-xs;
         source: item.cover;
-        if hot || current: Rectangle {
-            background: #00000066;
-            Icon { source: current && App.can-pause ? Icons.pause-filled-xs : Icons.play-filled-xs; size: 24px; colorize: #e6e6e6; }
+        Rectangle {
+            visible: root.emphasis > 0;
+            background: Theme.surface-color-primary-enabled-entity.transparentize(1 - 0.8 * root.emphasis);
+            Rectangle { background: Theme.surface-color-primary-enabled-list.transparentize(1 - root.emphasis); }
+        }
+        // Контуры play_filled_xs и pause_filled_xs из спрайта Яндекса.
+        Path {
+            x: play-area.x; y: play-area.y;
+            width: play-area.width; height: play-area.height;
+            viewbox-width: 24; viewbox-height: 24;
+            // Круг и значок обходим в разные стороны, чтобы внутри круга получился вырез.
+            commands: "M24 12C24 5.37258 18.6274 0 12 0C5.37258 0 0 5.37258 0 12C0 18.6274 5.37258 24 12 24C18.6274 24 24 18.6274 24 12Z"
+                + (root.current && App.can-pause
+                    ? "M9 7.875H11.25V16.125H9ZM12.75 7.875H15V16.125H12.75Z"
+                    : "M9.75 12V7.875H10.3125C10.3125 7.875 13.125 10.4062 16.5 11.7188V12.2812C13.125 13.5938 10.3125 16.125 10.3125 16.125H9.75Z");
+            fill: #fff.transparentize(1 - root.emphasis);
+            visible: root.emphasis > 0;
+            transform-scale: play-area.has-hover ? 1.05 : 1;
+            animate transform-scale { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+        }
+        play-area := TouchArea {
+            width: 24px; height: 24px;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.play(); }
         }
     }
     HorizontalLayout {
@@ -100,9 +125,10 @@ export component TrackRow inherits Rectangle {
         width: 40px;
         height: 40px;
         Icon {
-            source: item.liked ? Icons.liked-small : Icons.like-small;
+            source: App.track-liked(item.id, App.likes-revision) ? Icons.liked-small : Icons.like-small;
             size: 20px;
             colorize: like-ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
+            animate colorize { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
         }
         like-ta := TouchArea {
             mouse-cursor: MouseCursor.pointer;
@@ -115,10 +141,11 @@ export component TrackRow inherits Rectangle {
         width: 40px;
         height: 40px;
         Icon {
-            visible: root.removable && hot;
+            visible: root.removable && root.hot;
             source: Icons.bucket-small;
             size: 20px;
             colorize: bucket-ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
+            animate colorize { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
         }
         bucket-ta := TouchArea {
             enabled: root.removable;
@@ -134,7 +161,7 @@ export component TrackRow inherits Rectangle {
         width: 40px;
         height: 40px;
         Icon {
-            visible: hot;
+            visible: root.hot;
             source: Icons.more-small;
             size: 20px;
             colorize: more-ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
@@ -144,13 +171,14 @@ export component TrackRow inherits Rectangle {
             clicked => { App.row-menu(root.block, root.index, self.absolute-position.x + 20px, self.absolute-position.y + 40px); }
         }
     }
-    if !hot: Text {
-        x: parent.width - 18px - self.width;
+    Text {
+        visible: root.hover-progress < 1;
+        x: parent.width - 28px - self.width / 2;
         y: 20px;
         text: item.duration;
         font-size: Theme.font-size-label-m;
         font-weight: 500;
-        color: Theme.controls-color-primary-text-enabled;
+        color: Theme.controls-color-primary-text-enabled.transparentize(root.hover-progress);
     }
 }
 
@@ -169,13 +197,14 @@ export component BlockHeader inherits Rectangle {
         color: Theme.controls-color-primary-text-enabled-variant;
     }
     Icon {
-        x: title.preferred-width + 4px;
+        x: title.preferred-width + 4px + (header-ta.has-hover ? Theme.spacer-size-xs : 0px);
+        animate x { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
         y: 1px;
         source: Icons.arrow-right;
         size: 24px;
         colorize: Theme.controls-color-primary-text-enabled;
     }
-    TouchArea {
+    header-ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
     }
@@ -234,5 +263,93 @@ export component ChartLine inherits Rectangle {
         index: root.index;
         play => { root.play(); }
         like => { root.like(); }
+    }
+}
+
+// Строка трека альбома: номер вместо обложки, при наведении на его месте Play.
+export component AlbumTrackRow inherits Rectangle {
+    in property <TrackItem> item;
+    in property <bool> current;
+    in property <string> pos;
+    in property <string> block;
+    in property <int> index;
+    callback play();
+    callback like();
+    height: 56px;
+    border-radius: Theme.radius-size-m;
+    in property <bool> hot: ta.has-hover || like-ta.has-hover || more-ta.has-hover;
+    background: current || hot ? Theme.controls-color-secondary-default-disabled : transparent;
+    ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.play(); } }
+    if hot || current: Icon {
+        x: 8px;
+        source: current && App.can-pause ? Icons.pause-filled-xs : Icons.play-filled-xs;
+        size: 28px;
+        colorize: Theme.controls-color-primary-text-enabled;
+    }
+    if !hot && !current: Text {
+        x: 8px;
+        width: 28px;
+        horizontal-alignment: center;
+        text: root.pos;
+        font-size: Theme.font-size-label-m;
+        color: Theme.controls-color-primary-text-enabled;
+    }
+    HorizontalLayout {
+        x: 44px;
+        width: parent.width - 44px - 136px;
+        height: 20px;
+        spacing: 4px;
+        Text {
+            text: item.title;
+            overflow: elide;
+            horizontal-stretch: 0;
+            vertical-alignment: center;
+            font-size: Theme.font-size-label-m;
+            font-weight: 500;
+            color: current ? Theme.controls-color-primary-text-hovered : Theme.controls-color-primary-text-enabled-variant;
+        }
+        if item.version != "": Text {
+            text: item.version;
+            horizontal-stretch: 0;
+            vertical-alignment: center;
+            font-size: Theme.font-size-label-m;
+            font-weight: 500;
+            color: Theme.controls-color-primary-text-enabled;
+        }
+        if item.explicit: ExplicitMark { y: 1px; }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    Rectangle {
+        x: parent.width - 111px;
+        width: 40px;
+        height: 40px;
+        Icon {
+            source: App.track-liked(item.id, App.likes-revision) ? Icons.liked-small : Icons.like-small;
+            size: 20px;
+            colorize: Theme.controls-color-primary-text-enabled;
+        }
+        like-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.like(); } }
+    }
+    Rectangle {
+        x: parent.width - 40px - 8px;
+        width: 40px;
+        height: 40px;
+        Icon {
+            visible: hot;
+            source: Icons.more-small;
+            size: 20px;
+            colorize: more-ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
+        }
+        more-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { App.row-menu(root.block, root.index, self.absolute-position.x + 20px, self.absolute-position.y + 40px); }
+        }
+    }
+    if !hot: Text {
+        x: parent.width - 18px - self.width;
+        text: item.duration;
+        font-size: Theme.font-size-label-m;
+        font-weight: 500;
+        color: Theme.controls-color-primary-text-enabled;
     }
 }

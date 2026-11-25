@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
 
+/// Длина кроссфейда, когда его включают в настройках.
+pub const CROSSFADE_SECS: u32 = 6;
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Config {
@@ -44,12 +47,28 @@ pub struct Config {
     pub mode: String,
     /// Куда скачивать треки. Пусто — Музыка\Яндекс Музыка.
     pub download_dir: String,
+    /// Скачивать FLAC, если он есть у трека.
+    pub download_flac: bool,
+    /// Громкость в децибелах, а не квадратом положения ползунка.
+    pub log_volume: bool,
     /// Блоки главной и «Книг и подкастов», которые скрыл пользователь.
     pub hidden_blocks: Vec<HiddenBlock>,
     /// Раз в полчаса спрашивать GitHub о новой версии.
     pub check_updates: bool,
     /// «Треки 18+» в меню профиля.
     pub allow_explicit: bool,
+    /// Добавлять треки в конец плейлиста, а не в начало.
+    pub add_to_end: bool,
+    /// Пятно «Моей волны» движется. Выключено: анимация всё время тратит процессор.
+    pub wave_motion: bool,
+    /// Сколько секунд треки перетекают друг в друга; ноль — без кроссфейда.
+    pub crossfade_secs: u32,
+    /// Обычное окно при выходе, в пикселях экрана. На Wayland места окна не узнать.
+    pub window_pos: Option<[i32; 2]>,
+    pub window_size: Option<[u32; 2]>,
+    pub window_maximized: bool,
+    /// Место мини-плеера при выходе.
+    pub mini_pos: Option<[i32; 2]>,
 }
 
 /// Блок запоминается по id из скелета: он постоянный («recommended_playlists»), а заголовок
@@ -83,9 +102,18 @@ impl Default for Config {
             navbar_collapsed: false,
             mode: "smooth".into(),
             download_dir: String::new(),
+            download_flac: false,
+            log_volume: false,
             hidden_blocks: Vec::new(),
             check_updates: true,
             allow_explicit: true,
+            add_to_end: false,
+            wave_motion: false,
+            crossfade_secs: 0,
+            window_pos: None,
+            window_size: None,
+            window_maximized: false,
+            mini_pos: None,
         }
     }
 }
@@ -119,6 +147,11 @@ pub fn cache_dir() -> PathBuf {
 }
 
 impl Config {
+    /// Длина кроссфейда.
+    pub fn crossfade(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.crossfade_secs.into())
+    }
+
     pub fn load() -> Self {
         let mut c: Config = std::fs::read_to_string(dir().join("config.json"))
             .ok()
@@ -159,13 +192,7 @@ impl Config {
         let json = serde_json::to_string_pretty(&disk).map_err(std::io::Error::other)?;
         let path = dir().join("config.json");
         let tmp = dir().join("config.json.tmp");
-        std::fs::write(&tmp, json)?;
-        // Без DPAPI токен лежит открытым текстом: файл только для владельца.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
+        write_private(&tmp, json.as_bytes())?;
         std::fs::rename(&tmp, &path)
     }
 
@@ -181,6 +208,22 @@ impl Config {
         self.refresh_sealed = None;
         crate::secret::forget("refresh");
     }
+}
+
+/// На Linux без связки ключей токен лежит открытым текстом, поэтому файл сразу создаётся
+/// только для владельца, а не получает права после записи.
+fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+        // Права задаются только новому файлу, у оставшегося старого .tmp они бы не поменялись.
+        let _ = std::fs::remove_file(path);
+    }
+    o.open(path)?.write_all(data)
 }
 
 /// Ошибка вместе с причинами. reqwest сам пишет только «error sending request», а что

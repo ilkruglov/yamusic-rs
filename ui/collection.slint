@@ -1,7 +1,7 @@
 // Страница «Коллекция».
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, Shimmer, NavArrows } from "widgets.slint";
+import { Icons, Icon, Cover, Shimmer, NavArrows, ScrollBar } from "widgets.slint";
 import { T, App, Page, CardItem, TopArtistItem } from "state.slint";
 import { TrackRow, BlockHeader, Tab } from "rows.slint";
 
@@ -43,11 +43,13 @@ component EntityCard inherits Rectangle {
     }
 }
 
-export component CollectionPage inherits Rectangle {
+component CollectionContent inherits TouchArea {
     property <length> pad: 25px;
     property <length> col-w: (self.width - 2 * pad - 24px) / 2;
+    // Карточки по 186 px, между ними 16 px. У правого края допускаем 1 px.
+    property <int> card-count: max(0, floor((self.width - 2 * pad + 17px) / 202px));
 
-    Flickable {
+    flick := Flickable {
         VerticalLayout {
             padding-left: pad;
             padding-right: pad;
@@ -119,6 +121,9 @@ export component CollectionPage inherits Rectangle {
                         x: floor(i / 4) * (col-w + 24px);
                         y: 82px + mod(i, 4) * 56px - 8px;
                         width: col-w;
+                        property <length> pointer-x: root.mouse-x + root.absolute-position.x - self.absolute-position.x;
+                        property <length> pointer-y: root.mouse-y + root.absolute-position.y - self.absolute-position.y;
+                        hot: root.has-hover && pointer-x >= 0px && pointer-x < self.width && pointer-y >= 0px && pointer-y < self.height;
                         item: t;
                         block: "likes-preview";
                         index: i;
@@ -229,13 +234,12 @@ export component CollectionPage inherits Rectangle {
                         clicked => { App.create-playlist(); }
                     }
                 }
-                for p[i] in App.playlists: EntityCard {
+                for i in min(App.playlists.length, max(0, root.card-count - shift)): EntityCard {
                     x: (i + parent.shift) * 202px;
                     y: 89px;
                     width: 186px;
-                    visible: self.x + self.width <= root.width - 2 * pad + 1px;
-                    cover: p.cover;
-                    title: p.title;
+                    cover: App.playlists[i].cover;
+                    title: App.playlists[i].title;
                     clicked => { App.open-playlist(i); }
                 }
             }
@@ -255,22 +259,25 @@ export component CollectionPage inherits Rectangle {
                         clicked => { App.select-album-tab(i); }
                     }
                 }
-                for a[i] in App.albums: EntityCard {
+                for i in min(App.albums.length, root.card-count): EntityCard {
                     x: i * 202px;
                     y: 89px;
                     width: 186px;
-                    visible: self.x + self.width <= root.width - 2 * pad + 1px;
-                    cover: a.cover;
-                    title: a.title;
-                    subtitle: a.subtitle;
+                    cover: App.albums[i].cover;
+                    title: App.albums[i].title;
+                    subtitle: App.albums[i].subtitle;
                     clicked => { App.open-album(i); }
                 }
             }
         }
     }
-
-    NavArrows {
-        x: pad;
-        y: 13px;
+    ScrollBar {
+        content-y <=> flick.content-y;
+        content-height: flick.content-height;
     }
+}
+
+export component CollectionPage inherits Rectangle {
+    CollectionContent { }
+    NavArrows { x: 25px; y: 13px; }
 }

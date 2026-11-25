@@ -138,6 +138,27 @@ export component Icon inherits Image {
     image-fit: contain;
 }
 
+export component HoverIcon inherits Rectangle {
+    in property <image> source <=> glyph.source;
+    in property <brush> colorize <=> glyph.colorize;
+    in property <float> alpha: 1;
+    in property <length> size: 24px;
+    in property <bool> zoomed;
+    property <float> zoom: zoomed ? 1.05 : 1;
+    animate zoom { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+    width: size;
+    height: size;
+    // Округляем, как Skia при масштабе 1, чтобы значок не дёргался при наведении.
+    pure function pixel-offset(pos: length) -> length { return round(pos / 1phx) * 1phx - pos; }
+    glyph := Icon {
+        x: root.pixel-offset(root.absolute-position.x);
+        y: root.pixel-offset(root.absolute-position.y);
+        size: root.size;
+        opacity: root.alpha;
+        transform-scale: root.zoom;
+    }
+}
+
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <length> size: 24px;
@@ -155,6 +176,36 @@ export component IconButton inherits Rectangle {
     }
     ta := TouchArea {
         enabled: enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component BarButton inherits Rectangle {
+    in property <image> icon;
+    in property <length> icon-size: 24px;
+    in property <bool> enabled: true;
+    in property <bool> active;
+    in property <brush> ink: #ffffff80;
+    in property <brush> ink-hover: Theme.controls-color-secondary-text-hovered;
+    in property <brush> ink-active: Theme.controls-color-primary-default-enabled;
+    in property <bool> grow-on-hover;
+    in property <bool> smooth-color: grow-on-hover;
+    in property <brush> ink-off: #ffffff14;
+    out property <bool> hovered: ta.has-hover;
+    callback clicked;
+    width: 32px;
+    height: 32px;
+    border-radius: self.width / 2;
+    HoverIcon {
+        source: icon;
+        size: root.icon-size;
+        zoomed: root.grow-on-hover && ta.has-hover && root.enabled;
+        colorize: !enabled ? ink-off : active ? ink-active : ta.has-hover ? ink-hover : ink;
+        animate colorize { duration: App.motion && root.smooth-color ? Theme.duration-transition : 0ms; easing: ease; }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
     }
@@ -252,6 +303,28 @@ export component Field inherits TextInput {
     selection-background-color: #5c8ff566;
     selection-foreground-color: self.color;
     callback escape();
+    // Пока поле с фокусом, горячие клавиши окна его не трогают (src/gui/keys.rs).
+    changed has-focus => {
+        App.text-focused = self.has-focus;
+        if self.has-focus {
+            App.text-x = self.absolute-position.x;
+            App.text-y = self.absolute-position.y;
+            App.text-w = self.width;
+            App.text-h = self.height;
+        }
+    }
+    property <int> blur: App.blur-tick;
+    changed blur => {
+        if self.has-focus {
+            self.clear-focus();
+        }
+    }
+    // Выключенное поле (как поля названия и описания плейлиста после правки) отдаёт фокус.
+    changed enabled => {
+        if !self.enabled && self.has-focus {
+            self.clear-focus();
+        }
+    }
     key-pressed(e) => {
         if e.text == Key.Escape {
             self.escape();
@@ -381,5 +454,123 @@ export component Fade inherits Rectangle {
         height: root.height;
         opacity: root.k;
         @children
+    }
+}
+
+// Полоса прокрутки поверх страницы. Ставится последней, на место Flickable; `content-y`
+// связывается с ним в обе стороны.
+// Как у списков оригинала (`VirtualScroll`, полоса `::-webkit-scrollbar` 24 px): бегунок с
+// прозрачной рамкой 8 px, то есть видно 8 px в 8 px от края; длина — доля видимой части, но
+// не меньше 50 px вместе с рамкой. Виден, пока страница едет, и 200 мс после (`isScrolling`
+// у react-virtuoso), под курсором другого цвета. Тянуть можно и невидимый, как в Chromium.
+//
+// PgUp/PgDn и Home/End листают страницу. Клавиши Slint отдаёт только элементу с фокусом,
+// поэтому фокус держит полоса; поле ввода с фокусом (`field-focused`) оставляет их себе.
+export component ScrollBar inherits Rectangle {
+    in-out property <length> content-y;
+    in property <length> content-height;
+    in property <bool> field-focused;
+    property <length> range: max(0px, root.content-height - root.height);
+    // Бегунок вместе с рамкой.
+    property <length> size: max(50px, root.height * min(1, root.height / max(1px, root.content-height)));
+    property <float> value: root.range > 0 ? max(0, min(1, -root.content-y / root.range)) : 0;
+    // Страница у Chromium — 87,5% высоты (`kMinFractionToStepWhenPaging`, на Windows и Linux
+    // без ограничения перекрытия), в целых пикселях.
+    property <length> page: max(1px, floor(root.height * 0.875 / 1px) * 1px);
+    property <bool> scrolling;
+    changed content-y => {
+        root.scrolling = true;
+        // `restart()` не запускает остановленный таймер: сначала включаем, потом отсчёт заново.
+        idle.running = true;
+        idle.restart();
+    }
+    idle := Timer {
+        interval: 200ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.scrolling = false;
+        }
+    }
+
+    thumb := TouchArea {
+        x: root.width - 24px;
+        y: (root.height - root.size) * root.value;
+        width: 24px;
+        height: root.size;
+        enabled: root.range > 0;
+        property <length> grab-y;
+        property <float> grab-value;
+        pointer-event(e) => {
+            if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                self.grab-y = self.absolute-position.y + self.mouse-y;
+                self.grab-value = root.value;
+            }
+        }
+        moved => {
+            if self.pressed && root.height > root.size {
+                root.content-y = -root.range * max(0, min(1, self.grab-value
+                    + (self.absolute-position.y + self.mouse-y - self.grab-y) / (root.height - root.size)));
+            }
+        }
+        Rectangle {
+            x: 8px;
+            y: 8px;
+            width: 8px;
+            height: parent.height - 16px;
+            border-radius: 4px;
+            visible: root.range > 0 && (root.scrolling || thumb.pressed);
+            background: thumb.has-hover || thumb.pressed ? Theme.surface-color-primary-enabled-entity : Theme.controls-color-primary-default-disabled;
+        }
+    }
+
+    keys := FocusScope {
+        // Иначе первый щелчок по странице ушёл бы на то, чтобы забрать фокус.
+        focus-on-click: false;
+        // Плеер на весь экран держит фокус ради Esc, его не отбираем.
+        init => {
+            if !App.fullscreen {
+                self.focus();
+            }
+        }
+        key-pressed(e) => {
+            // Как в Chromium: с Shift, Alt и Win не листают, с Ctrl — только Home и End.
+            if e.modifiers.shift || e.modifiers.alt || e.modifiers.meta {
+                return reject;
+            }
+            if e.text == Key.Home {
+                root.content-y = 0px;
+                return accept;
+            }
+            if e.text == Key.End {
+                root.content-y = -root.range;
+                return accept;
+            }
+            if e.modifiers.control {
+                return reject;
+            }
+            if e.text == Key.PageDown {
+                root.content-y = max(-root.range, root.content-y - root.page);
+                return accept;
+            }
+            if e.text == Key.PageUp {
+                root.content-y = min(0px, root.content-y + root.page);
+                return accept;
+            }
+            reject
+        }
+    }
+    // Фокус возвращается странице, когда его отпускает поле ввода или закрывается плеер
+    // на весь экран: иначе клавиши некому принять.
+    changed field-focused => {
+        if !root.field-focused && !App.fullscreen {
+            keys.focus();
+        }
+    }
+    property <bool> fullscreen: App.fullscreen;
+    changed fullscreen => {
+        if !root.fullscreen {
+            keys.focus();
+        }
     }
 }

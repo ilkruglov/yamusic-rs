@@ -155,7 +155,6 @@ component Poster inherits Rectangle {
                 size: 40px;
                 icon: App.repeat == 2 ? Icons.repeat-one-small : Icons.repeat-small;
                 icon-size: 20px;
-                enabled: !App.is-wave;
                 ink: App.repeat > 0 ? Theme.controls-color-primary-default-enabled : #ffffff80;
                 clicked => { App.cycle-repeat(); }
             }
@@ -466,6 +465,17 @@ export component FullscreenPlayer inherits Rectangle {
     property <bool> side: App.fs-mode != 0;
     property <length> py: (self.height - 510px) / 2;
 
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(e) => {
+            if e.text == Key.Escape {
+                App.fullscreen = false;
+                return accept;
+            }
+            reject
+        }
+    }
+
     // Движение мыши показывает строки текста выше текущей.
     TouchArea {
         changed mouse-x => { if App.fs-mode == 2 { App.lyrics-mouse(); } }
@@ -515,7 +525,6 @@ export component FullscreenPlayer inherits Rectangle {
                 artists: App.artists,
                 duration: App.format-time(App.duration),
                 cover: App.cover,
-                liked: App.liked,
                 explicit: App.track-explicit,
                 available: true,
             };

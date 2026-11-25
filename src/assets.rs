@@ -130,7 +130,13 @@ impl WebCache {
                 .build()
                 .expect("http client")
         });
-        let resp = http.get(format!("{WEB_ORIGIN}/{rel}")).send().ok()?;
+        let resp = match http.get(format!("{WEB_ORIGIN}/{rel}")).send() {
+            Ok(r) => r,
+            Err(e) => {
+                log(format!("ассет {rel}: {e}"));
+                return None;
+            }
+        };
         if !resp.status().is_success() {
             log(format!("ассет {rel}: HTTP {}", resp.status()));
             return None;

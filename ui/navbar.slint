@@ -11,22 +11,23 @@ component NavLink inherits Rectangle {
     in property <Page> page;
     property <bool> selected: App.page == page;
     height: 48px;
-    border-radius: Theme.radius-size-l;
-    background: ta.has-hover && !selected ? Theme.controls-color-secondary-default-enabled : transparent;
-    animate background { duration: App.motion ? Theme.duration-transition : 0ms; }
+    border-radius: Theme.radius-size-xxl;
+    background: ta.has-hover ? Theme.surface-color-primary-enabled-list : transparent;
+    animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
     Icon {
-        x: 16px;
+        x: 12px;
         source: selected ? icon-selected : icon;
         size: 24px;
         colorize: selected || ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
+        animate colorize { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
     }
     if !App.nav-collapsed: Text {
-        x: 52px;
+        x: 48px;
         text: root.text;
         font-size: Theme.font-size-label-m;
         font-weight: 500;
         color: selected || ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
-        animate color { duration: App.motion ? Theme.duration-transition : 0ms; }
+        animate color { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
     }
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
@@ -51,20 +52,20 @@ export component Navbar inherits TouchArea {
     }
     // Кнопка 16×28 у логотипа, видна только при наведении на навбар.
     Rectangle {
-        x: c ? 64px : 183px;
+        x: root.width - 8px;
         y: 22px;
         width: 16px;
         height: 28px;
         border-radius: Theme.radius-size-s;
         background: Theme.controls-color-secondary-default-enabled;
         opacity: root.has-hover ? 1 : 0;
-        animate opacity { duration: App.motion ? Theme.duration-transition : 0ms; }
+        animate opacity { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
         Icon {
             source: c ? Icons.arrow-right-small : Icons.arrow-left-small;
             size: 20px;
-            colorize: Theme.controls-color-secondary-on-outline-enabled-variant;
+            colorize: collapse-ta.has-hover ? Theme.controls-color-secondary-on-default-enabled : Theme.controls-color-secondary-on-outline-enabled-variant;
         }
-        TouchArea {
+        collapse-ta := TouchArea {
             enabled: root.has-hover;
             mouse-cursor: MouseCursor.pointer;
             clicked => { App.toggle-navbar(); }
@@ -72,9 +73,9 @@ export component Navbar inherits TouchArea {
     }
 
     VerticalLayout {
-        x: 8px;
+        x: 12px;
         y: 76px;
-        width: parent.width - 16px;
+        width: c ? 48px : parent.width - self.x;
         spacing: 4px;
         NavLink { icon: Icons.nav-search; icon-selected: Icons.nav-search; text: T.t("Поиск"); page: Page.search; }
         NavLink { icon: Icons.nav-wave; icon-selected: Icons.nav-wave; text: T.t("Моя волна"); page: Page.wave; }
@@ -88,27 +89,27 @@ export component Navbar inherits TouchArea {
         x: 0;
         y: 76px + 6 * 48px + 5 * 4px + 24px;
         width: parent.width;
-        height: parent.height - self.y - 72px;
+        height: max(0px, parent.height - self.y - 92px);
         content-height: App.pins.length * 56px;
         for pin[i] in App.pins: Rectangle {
-            x: 8px;
+            x: 6px;
             y: i * 56px;
-            width: parent.width - 16px;
+            width: pins.width - 12px;
             height: 56px;
-            border-radius: Theme.radius-size-l;
-            background: pin-ta.has-hover ? Theme.controls-color-secondary-default-enabled : transparent;
-            animate background { duration: App.motion ? 150ms : 0ms; }
+            border-radius: Theme.radius-size-m;
+            background: pin-ta.has-hover || more-ta.has-hover ? Theme.controls-color-secondary-default-enabled : transparent;
+            animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
             Cover {
-                x: 8px;
+                x: 10px;
                 width: 40px;
                 height: 40px;
                 source: pin.cover;
                 round: pin.round;
-                radius: Theme.radius-size-s;
+                radius: Theme.radius-size-xs;
             }
             if !c: VerticalLayout {
-                x: 56px;
-                width: 92px;
+                x: 58px;
+                width: max(0px, parent.width - self.x - 42px);
                 alignment: center;
                 Text {
                     text: pin.title;
@@ -129,6 +130,21 @@ export component Navbar inherits TouchArea {
                 mouse-cursor: MouseCursor.pointer;
                 clicked => { App.open-pin(i); }
             }
+            Icon {
+                x: parent.width - 32px;
+                size: 20px;
+                source: Icons.more-small;
+                visible: !c && (pin-ta.has-hover || more-ta.has-hover);
+                colorize: more-ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
+            }
+            more-ta := TouchArea {
+                x: parent.width - 40px;
+                width: 36px;
+                height: 36px;
+                enabled: !c;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { App.open-pin-menu(i, self.absolute-position.x + self.width / 2, self.absolute-position.y + self.height); }
+            }
         }
     }
 
@@ -147,14 +163,15 @@ export component Navbar inherits TouchArea {
             background: Theme.background-color-primary-enabled-basic;
         }
         Cover {
-            width: 34px;
-            height: 34px;
+            width: profile-ta.has-hover && profile-ta.mouse-x <= 42px ? 35.7px : 34px;
+            height: self.width;
+            animate width { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
             round: true;
             source: App.avatar;
         }
     }
     // Клик по профилю открывает меню Яндекс ID.
-    TouchArea {
+    profile-ta := TouchArea {
         x: 15px;
         y: parent.height - 61px;
         width: parent.width - 19px;

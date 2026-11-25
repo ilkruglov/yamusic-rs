@@ -101,7 +101,7 @@ mod keyring {
         }
         let saved = with(|ss| {
             let c = ss.get_default_collection().or_else(|_| ss.get_any_collection())?;
-            c.ensure_unlocked()?;
+            c.unlock()?;
             c.create_item(&label(name), attributes(name), secret.as_bytes(), true, "text/plain")?;
             Ok(())
         });
@@ -117,7 +117,8 @@ mod keyring {
         let secret = with(|ss| {
             let found = ss.search_items(attributes(name))?;
             let Some(item) = found.unlocked.first().or(found.locked.first()) else { return Ok(None) };
-            item.ensure_unlocked()?;
+            // ensure_unlocked только проверяет. KeePassXC отдаёт записи запертыми до Unlock (#81).
+            item.unlock()?;
             Ok(String::from_utf8(item.get_secret()?).ok())
         })??;
         cached(|m| {
@@ -130,7 +131,13 @@ mod keyring {
         let mut known = false;
         cached(|m| known = m.remove(name).is_some());
         if known {
-            with(|ss| ss.search_items(attributes(name))?.unlocked.iter().try_for_each(|i| i.delete()));
+            with(|ss| {
+                let found = ss.search_items(attributes(name))?;
+                found.unlocked.iter().chain(&found.locked).try_for_each(|i| {
+                    i.unlock()?;
+                    i.delete()
+                })
+            });
         }
     }
 }
@@ -151,6 +158,12 @@ pub fn seal(name: &str, plain: &str) -> Option<String> {
     {
         keyring::store(name, plain).then(|| format!("{IN_KEYRING}{name}"))
     }
+    // Android: config.json и так лежит в личной папке приложения, другим приложениям её не прочесть.
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = (name, plain);
+        None
+    }
 }
 
 /// Достать секрет из конфига; None — чужая учётная запись, нет записи или испорченные данные.
@@ -164,13 +177,18 @@ pub fn open(sealed: &str) -> Option<String> {
     {
         keyring::load(sealed.trim().strip_prefix(IN_KEYRING)?)
     }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = sealed;
+        None
+    }
 }
 
 /// Секрет больше не нужен (вышли из аккаунта). DPAPI ничего не хранит, связку ключей чистим.
 pub fn forget(name: &str) {
     #[cfg(target_os = "linux")]
     keyring::remove(name);
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     let _ = name;
 }
 

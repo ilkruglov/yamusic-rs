@@ -14,8 +14,10 @@ import { GridPage } from "grid.slint";
 import { AccountMenu, SettingsPage, LoginScreen } from "account.slint";
 import { FullscreenPlayer } from "fullscreen.slint";
 import { TrackMenu, SoundSettings } from "popups.slint";
+import { ShortcutsModal } from "modals.slint";
 import { T, App, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry } from "state.slint";
 import { LandingPage, ChartPage } from "landing.slint";
+import { HistoryPage } from "history.slint";
 
 export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry }
 
@@ -136,7 +138,8 @@ export component AppWindow inherits Window {
         if App.page == Page.grid: Fade { rise: 8px; GridPage { } }
         if App.page == Page.trends || App.page == Page.concerts || App.page == Page.nonmusic: Fade { rise: 8px; LandingPage { } }
         if App.page == Page.chart: Fade { rise: 8px; ChartPage { } }
-        if App.page != Page.list && App.page != Page.collection && App.page != Page.wave && App.page != Page.search && App.page != Page.artist && App.page != Page.artists && App.page != Page.settings && App.page != Page.grid && App.page != Page.trends && App.page != Page.concerts && App.page != Page.nonmusic && App.page != Page.chart: Text {
+        if App.page == Page.history: Fade { rise: 8px; HistoryPage { } }
+        if App.page != Page.list && App.page != Page.collection && App.page != Page.wave && App.page != Page.search && App.page != Page.artist && App.page != Page.artists && App.page != Page.settings && App.page != Page.grid && App.page != Page.trends && App.page != Page.concerts && App.page != Page.nonmusic && App.page != Page.chart && App.page != Page.history: Text {
             text: T.t("Раздел в разработке");
             color: Theme.controls-color-primary-text-enabled;
             font-size: Theme.font-size-headline-xs;
@@ -215,6 +218,20 @@ export component AppWindow inherits Window {
         height: sound.height;
         rise: 8px;
         sound := SoundSettings { }
+    }
+
+    // «Горячие клавиши»: по центру на затемнённой подложке, клик мимо закрывает.
+    if App.shortcuts-open: Rectangle {
+        background: Theme.background-color-primary-enabled-overlay;
+        TouchArea { clicked => { App.shortcuts-open = false; } }
+    }
+    if App.shortcuts-open: Fade {
+        x: (parent.width - shortcuts.width) / 2;
+        y: (parent.height - shortcuts.height) / 2;
+        width: shortcuts.width;
+        height: shortcuts.height;
+        rise: 8px;
+        shortcuts := ShortcutsModal { }
     }
 
     if App.menu-open: Fade {

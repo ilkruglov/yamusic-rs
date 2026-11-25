@@ -110,7 +110,7 @@ extern "C" void ya_asio_close(Output* s) {
     delete s;
 }
 
-extern "C" const char* ya_asio_open(const wchar_t* id, Output** out, unsigned* rate, unsigned short* channels) {
+extern "C" const char* ya_asio_open(const wchar_t* id, Output** out, unsigned* rate, unsigned short* channels, unsigned* frames) {
     std::unique_ptr<Output, decltype(&ya_asio_close)> state(new(std::nothrow) Output(), ya_asio_close);
     auto* s = state.get();
     if (!s) return "out of memory";
@@ -154,6 +154,7 @@ extern "C" const char* ya_asio_open(const wchar_t* id, Output** out, unsigned* r
     s->output_ready = s->driver->outputReady() == ASE_OK;
     *rate = static_cast<unsigned>(hz);
     *channels = static_cast<unsigned short>(s->channels);
+    *frames = static_cast<unsigned>(s->frames);
     *out = state.release();
     return nullptr;
 }

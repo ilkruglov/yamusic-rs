@@ -1,16 +1,15 @@
 // Общее состояние интерфейса (глобал App), структуры строк и карточек, переводы (T).
 // Rust пишет сюда данные и подписывается на колбэки.
 
-export enum Page { wave, search, trends, concerts, nonmusic, collection, list, artist, artists, settings, grid, chart }
+export enum Page { wave, search, trends, concerts, nonmusic, collection, list, artist, artists, settings, grid, chart, history }
 
 export struct TrackItem {
-    track-id: string,
+    id: string,
     title: string,
     version: string,
     artists: string,
     duration: string,
     cover: image,
-    liked: bool,
     explicit: bool,
     available: bool,
     artist-names: [string],
@@ -41,6 +40,27 @@ export struct ChartRow {
     item: TrackItem,
     pos: string,
     trend: int,
+}
+
+// Строка истории. kind: 0 — день, 1 — откуда слушали, 2 — трек, 3 — трек альбома с номером.
+export struct HistRow {
+    kind: int,
+    y: length,
+    title: string,
+    subtitle: string,
+    // «Альбом» или «Плейлист» над заголовком группы.
+    label: string,
+    cover: image,
+    round: bool,
+    bg: color,
+    arrow: bool,
+    pos: string,
+    item: TrackItem,
+}
+
+export struct HistTab {
+    title: string,
+    y: length,
 }
 
 // Вкладка лендинга: «Для вас», «Тренды», «Книги»… — с обложками и подписью.
@@ -108,11 +128,24 @@ export struct MenuEntry {
     submenu: bool,
 }
 
+export struct WaveOption {
+    name: string,
+    image: image,
+    selected: bool,
+}
+
+// Группа настроек «Моей волны»: «По характеру», «Под настроение», «По языку».
+export struct WaveSettingGroup {
+    name: string,
+    options: [WaveOption],
+}
+
 export struct WheelEntry {
     name: string,
     description: string,
     cover: image,
     round: bool,
+    control-accent: bool,
 }
 
 // trend: 0 — корона (первое место), 1 — без изменений, 2 — вверх, 3 — вниз, 4 — новый.
@@ -160,6 +193,17 @@ export global App {
     // Подсказка у значка «!»: текст дисклеймера рядом с курсором.
     in property <string> hint-text: "Возрастное ограничение 18+";
     in-out property <bool> hint-open;
+    // Окно «Горячие клавиши».
+    in-out property <bool> shortcuts-open;
+    // У поля ввода (`Field`) фокус и где это поле: горячие клавиши в это время не работают,
+    // клик мимо поля снимает с него фокус.
+    in-out property <bool> text-focused;
+    in-out property <length> text-x;
+    in-out property <length> text-y;
+    in-out property <length> text-w;
+    in-out property <length> text-h;
+    // Увеличивается, когда поле должно отдать фокус.
+    in-out property <int> blur-tick;
     in-out property <length> hint-x;
     in-out property <length> hint-y;
     // История переходов, как в браузере.
@@ -168,6 +212,7 @@ export global App {
     in property <string> version;
     in property <string> app-name;
     in property <[WheelEntry]> wheel;
+    in-out property <float> wheel-offset;
     in property <bool> pinned;
 
     // Аккаунт
@@ -190,6 +235,8 @@ export global App {
     in property <float> position;
     in property <float> duration;
     in property <bool> liked;
+    in property <int> likes-revision;
+    pure callback track-liked(string, int) -> bool;
     in property <int> repeat;
     in property <bool> shuffle;
     in property <float> volume: 0.6;
@@ -197,6 +244,10 @@ export global App {
     in property <string> source-title;
     // Волна по треку, исполнителю, вайбу: над пятном «челка» с крестиком.
     in property <bool> wave-context;
+    // Формат играющего файла, как у мода PulseSync: «MP3 320».
+    in property <string> track-format;
+    in property <[WaveSettingGroup]> wave-settings;
+    in-out property <bool> wave-settings-open;
     in property <[string]> artist-list;
     in property <string> artists-longest;
     // Фаза анимации пятна, секунды; идёт только во время игры на странице волны.
@@ -294,6 +345,8 @@ export global App {
     in property <[MenuEntry]> menu-items;
     in-out property <int> submenu-open: -1;
     in property <[string]> menu-playlists;
+    // Есть ли трек из меню в плейлисте с тем же номером.
+    in property <[bool]> menu-playlist-has;
     // Меню в теме приложения (кроме волны и плеера на весь экран) и под кнопкой, а не над ней.
     in property <bool> menu-themed;
     in property <bool> menu-below;
@@ -323,6 +376,7 @@ export global App {
     in property <[ChartRow]> search-chart;
     in property <[CardItem]> search-history;
     in property <bool> searching;
+    in property <bool> search-tracks-only;
     in property <bool> results-loading;
     in property <[TrackItem]> sr-tracks;
     in property <[CardItem]> sr-artists;
@@ -373,6 +427,20 @@ export global App {
     callback chart-play(int);
     callback chart-like(int);
 
+    // История: какие строки сейчас на экране, Rust считает по прокрутке.
+    in property <[HistRow]> hist-rows;
+    in property <[HistTab]> hist-tabs;
+    in property <int> hist-tab;
+    in property <int> hist-first;
+    in property <int> hist-count;
+    in property <length> hist-height;
+    in property <bool> hist-loading;
+    callback hist-scrolled(length, length);
+    callback hist-cover(int);
+    callback hist-play(int);
+    callback hist-like(int);
+    callback hist-open(int);
+
     // «Смотреть всё»: вкладки и сетка карточек.
     in property <string> grid-title;
     in property <[string]> grid-tabs;
@@ -405,6 +473,10 @@ export global App {
     in-out property <int> audio-output-index;
     in property <bool> audio-output-pending;
     callback select-audio-output(int);
+    in property <bool> download-flac;
+    in property <bool> log-volume;
+    in property <bool> wave-motion;
+    in property <bool> crossfade;
     // Режим работы: «Плавный» — анимации и кэш слоёв, «Лёгкий» — без них.
     in property <bool> motion: true;
     // Статус «Слушает» в профиле Discord и что с ним сейчас.
@@ -441,6 +513,8 @@ export global App {
     callback open-current-album();
     callback open-current-artist(int);
     callback reset-wave();
+    callback open-wave-settings();
+    callback tune-wave(int, int);
     callback go-forward();
     callback row-open-album(string, int);
     callback row-open-artist(string, int, int);
@@ -450,6 +524,7 @@ export global App {
     callback seek-lyric(int);
 
     callback search-edited(string);
+    callback open-search-tracks();
     callback open-suggest(int);
     callback open-card(string, int);
     callback play-chart(int);
@@ -468,6 +543,7 @@ export global App {
     callback artist-like-track(int);
     callback artist-familiar();
     callback open-pin(int);
+    callback open-pin-menu(int, length, length);
     callback open-likes();
     callback open-playlist(int);
     callback open-album(int);

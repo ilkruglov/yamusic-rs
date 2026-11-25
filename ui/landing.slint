@@ -1,7 +1,7 @@
 // Лендинги по скелету сервера: «Для вас и Тренды», «Концерты», «Книги и подкасты», «Чарт».
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, Pic, Shimmer, ExplicitMark, NavCircle } from "widgets.slint";
+import { Icons, Icon, Cover, Pic, Shimmer, ExplicitMark, NavCircle, ScrollBar } from "widgets.slint";
 import { T, App, LBlock, LCard, LTab, ChartRow, TrackItem } from "state.slint";
 import { TrackRow, ChartLine } from "rows.slint";
 import { CarouselArrow } from "shelf.slint";
@@ -1166,6 +1166,10 @@ export component LandingPage inherits Rectangle {
         font-weight: 700;
         color: Theme.controls-color-primary-text-enabled-variant;
     }
+    ScrollBar {
+        content-y <=> flick.content-y;
+        content-height: flick.content-height;
+    }
 }
 
 // Чарт: «‹ Чарт», 100 треков с местом и движением.
@@ -1240,5 +1244,9 @@ export component ChartPage inherits Rectangle {
         font-size: sticky ? 22px : 32px;
         font-weight: 700;
         color: Theme.controls-color-primary-text-enabled-variant;
+    }
+    ScrollBar {
+        content-y <=> flick.content-y;
+        content-height: flick.content-height;
     }
 }

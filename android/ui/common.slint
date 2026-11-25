@@ -1,0 +1,353 @@
+// Общее для экранов: иконки из APK оригинала, данные плеера и мелкие кнопки.
+
+export struct Icons {
+    logo: image,
+    search: image,
+    play: image,
+    pause: image,
+    like: image,
+    liked: image,
+    tab-wave: image,
+    tab-home: image,
+    tab-concerts: image,
+    tab-collection: image,
+    chevron-down: image,
+    queue: image,
+    share: image,
+    more: image,
+    dislike: image,
+    repeat: image,
+    repeat-one: image,
+    lyrics: image,
+    download: image,
+    timer: image,
+    sound: image,
+    listeners: image,
+    explicit: image,
+    add: image,
+    fullscreen: image,
+    arrow-right: image,
+    check: image,
+    text: image,
+    trailer: image,
+    play-small: image,
+    chart: image,
+    book: image,
+    kids: image,
+    podcast: image,
+    clip: image,
+    playlist: image,
+    album: image,
+    profile: image,
+    logout: image,
+    open: image,
+}
+
+export struct WheelCard {
+    name: string,
+    description: string,
+    cover: image,
+    round: bool,
+    blob: image,
+}
+
+/// Строка списка: трек, плейлист.
+export struct Row {
+    title: string,
+    subtitle: string,
+    cover: image,
+    explicit: bool,
+}
+
+/// Карточка исполнителя под плеером.
+export struct ArtistCard {
+    name: string,
+    listeners: string,
+    photo: image,
+    color: color,
+    liked: bool,
+}
+
+/// Что играет и всё, что показывают плеер, шторки и экран волны.
+export global Now {
+    in property <Icons> icons;
+    in property <bool> has-track;
+    in property <string> track-id;
+    in property <string> source: "Моя волна";
+    in property <string> title;
+    in property <string> version;
+    in property <string> artists;
+    in property <string> artist;
+    in property <bool> explicit;
+    in property <image> cover;
+    in property <image> cover-big;
+    in property <image> avatar;
+    in property <image> cutout;
+    in property <color> bg: #1f1f1f;
+    in property <bool> playing;
+    in property <bool> loading;
+    in property <bool> liked;
+    in property <float> progress;
+    in property <string> position-text: "0:00";
+    in property <string> duration-text: "0:00";
+    in property <string> status;
+    // 0 выкл, 1 по кругу, 2 один трек.
+    in property <int> repeat;
+    in property <bool> has-lyrics;
+    in property <[string]> lyrics;
+    // Строка, которая поётся сейчас; -1 — текст без времени.
+    in property <int> lyric: -1;
+    in-out property <bool> lyrics-mode;
+    in property <[ArtistCard]> artist-cards;
+    in property <[Row]> similar;
+    in property <[Row]> playlists;
+    in property <[Row]> queue;
+    // 0 автоматическое, 1 превосходное, 2 оптимальное, 3 экономичное.
+    in property <int> quality;
+    in property <bool> timer-on;
+    in property <string> timer-left;
+
+    callback play-pause();
+    callback next();
+    callback prev();
+    callback like();
+    callback dislike();
+    callback seek(float);
+    callback toggle-repeat();
+    callback track-wave();
+    callback share();
+    callback download();
+    in-out property <string> toast;
+    callback trailer();
+    callback play-similar(int);
+    callback add-to-playlist(int);
+    callback like-artist(int);
+    callback jump(int);
+    callback set-quality(int);
+    callback start-timer(int, bool);
+    callback stop-timer();
+    // -1 — первый исполнитель текущего трека.
+    callback open-artist(int);
+    callback open-album();
+    callback open-playlists();
+    // Что играет вместо обычной волны: плейлист, альбом, вайб. Пусто — обычная волна.
+    in property <string> pill;
+    callback back-to-wave();
+}
+
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <length> icon-size: 24px;
+    in property <color> tint: #fff;
+    callback clicked();
+    width: 48px;
+    height: 48px;
+    Image {
+        source: root.icon;
+        width: root.icon-size;
+        height: root.icon-size;
+        colorize: root.tint;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+/// Предыдущий и следующий трек: в APK этих иконок нет, у оригинала они в коде Compose.
+export component SkipIcon inherits Path {
+    in property <bool> forward;
+    width: 24px;
+    height: 24px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: #fff;
+    commands: root.forward
+        ? "M16 4.2h3v15.6h-3z M4.5 5.6c0-1 1.1-1.6 1.9-1l9.1 6.4c.7.5.7 1.5 0 2L6.4 19.4c-.8.6-1.9 0-1.9-1z"
+        : "M5 4.2h3v15.6H5z M19.5 5.6c0-1-1.1-1.6-1.9-1L8.5 11c-.7.5-.7 1.5 0 2l9.1 6.4c.8.6 1.9 0 1.9-1z";
+}
+
+/// Иконка «Слушать на устройстве»: экран и колонка.
+export component DeviceIcon inherits Path {
+    width: 24px;
+    height: 24px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: #ffffffe6;
+    stroke-width: 1.8px;
+    commands: "M11 16H5.5A1.5 1.5 0 0 1 4 14.5v-9A1.5 1.5 0 0 1 5.5 4h12A1.5 1.5 0 0 1 19 5.5V8 M4 20h7 M14 12.5c0-1 1.6-1.6 3.5-1.6s3.5.6 3.5 1.6v6.5c0 1-1.6 1.6-3.5 1.6S14 20 14 19z M14 12.5c0 1 1.6 1.6 3.5 1.6s3.5-.6 3.5-1.6";
+}
+
+/// Свернуть текст песни: стрелки внутрь.
+export component CollapseIcon inherits Path {
+    width: 24px;
+    height: 24px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    stroke: #fff;
+    stroke-width: 2px;
+    commands: "M14 4v6h6 M14 10l6.5-6.5 M10 20v-6H4 M10 14l-6.5 6.5";
+}
+
+/// Обложка с плейсхолдером, пока картинка грузится.
+export component Cover inherits Rectangle {
+    in property <image> source;
+    in property <length> radius: 6px;
+    border-radius: self.radius;
+    clip: true;
+    background: #ffffff14;
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.source;
+        image-fit: cover;
+    }
+}
+
+/// Трек в списке: обложка 52, название, исполнители и «ещё».
+export component TrackRow inherits Rectangle {
+    in property <Row> item;
+    in property <color> fg: #fff;
+    callback clicked();
+    height: 64px;
+    Cover {
+        x: 28.2px;
+        y: 6px;
+        width: 52px;
+        height: 52px;
+        source: root.item.cover;
+    }
+    Text {
+        x: 92.6px;
+        y: 12.8px;
+        width: max(0px, root.width - self.x - 24px);
+        text: root.item.title;
+        color: root.fg;
+        font-size: 17px;
+        font-weight: 500;
+        overflow: elide;
+    }
+    Text {
+        x: 92.6px;
+        y: 34.9px;
+        width: max(0px, root.width - self.x - 24px);
+        text: root.item.subtitle;
+        color: root.fg.transparentize(0.5);
+        font-size: 14px;
+        overflow: elide;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+/// Шторка снизу на светлом фоне, как у оригинала. Закрывается тапом мимо и «Назад».
+export component Sheet inherits Rectangle {
+    in-out property <bool> open;
+    in property <length> panel-height;
+    in property <color> panel-color: T.sheet;
+    visible: root.open || panel.y < root.height - 1px;
+    // Насколько шторку утянули пальцем вниз.
+    property <length> drag: swipe.swiping ? max(0px, swipe.current-position.y - swipe.pressed-position.y) : 0px;
+
+    swipe := SwipeGestureHandler {
+        handle-swipe-down: root.open && list.content-y >= 0;
+        swiped => {
+            if self.current-position.y - self.pressed-position.y > min(120px, panel.height / 4) {
+                root.open = false;
+            }
+        }
+
+        Rectangle {
+            background: root.open ? #00000066 : #00000000;
+            animate background { duration: 250ms; }
+            TouchArea {
+                clicked => { root.open = false; }
+            }
+        }
+        panel := Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.open ? root.height - self.height : root.height) + root.drag;
+            animate y {
+                duration: swipe.swiping ? 0ms : 280ms;
+                easing: ease-out;
+            }
+            width: min(root.width, 520px);
+            height: min(root.panel-height, max(0px, root.height - 24px));
+            background: root.panel-color;
+            border-top-left-radius: 24px;
+            border-top-right-radius: 24px;
+            clip: true;
+            TouchArea { }
+            list := Flickable {
+                content-width: self.width;
+                content-height: max(self.height, root.panel-height);
+                interactive: root.panel-height > self.height;
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: panel.width;
+                    height: root.panel-height;
+                    Rectangle {
+                        y: 8px;
+                        width: 36px;
+                        height: 4px;
+                        border-radius: 2px;
+                        background: T.fg.with-alpha(0.12);
+                    }
+                    @children
+                }
+            }
+        }
+    }
+}
+
+export component QualityOption inherits Rectangle {
+    in property <string> title;
+    in property <string> text;
+    in property <bool> checked;
+    callback clicked();
+    VerticalLayout {
+        x: 16.7px;
+        width: parent.width - 60px;
+        alignment: start;
+        spacing: 2px;
+        Text {
+            text: root.title;
+            color: T.fg;
+            font-size: 16px;
+        }
+        Text {
+            text: root.text;
+            color: T.fg.with-alpha(0.55);
+            font-size: 14px;
+            wrap: word-wrap;
+        }
+    }
+    if root.checked: Image {
+        x: parent.width - 42px;
+        y: 6px;
+        width: 24px;
+        height: 24px;
+        source: Now.icons.check;
+        colorize: T.fg;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// Цвета светлой и тёмной темы, сняты с мобильного клиента.
+export global T {
+    in property <string> display-font: "YS Display";
+    in property <bool> dark;
+    // Высота статус-бара: окно лежит под ним.
+    in property <length> top: 52px;
+    out property <color> bg: root.dark ? #000 : #fff;
+    out property <color> fg: root.dark ? #fff : #000;
+    out property <color> card: root.dark ? #141414 : #f5f5f5;
+    out property <color> line: root.dark ? #262626 : #0000000d;
+    out property <color> strong: root.dark ? #e6e6e6 : #1f1f1f;
+    out property <color> mini: root.dark ? #1a1b21 : #ececec;
+    out property <color> mini-fill: root.dark ? #25262d : #e0e0e0;
+    out property <color> sheet: root.dark ? #141414 : #f5f4f2;
+}

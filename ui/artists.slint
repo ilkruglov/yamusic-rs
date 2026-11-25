@@ -1,7 +1,7 @@
 // Исполнители из коллекции: топ месяца и понравившиеся.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, NavCircle } from "widgets.slint";
+import { Icons, Icon, Cover, NavCircle, ScrollBar } from "widgets.slint";
 import { T, App } from "state.slint";
 
 // «Исполнители» из коллекции: топ месяца (карточки от 228) и понравившиеся (от 178).
@@ -142,5 +142,9 @@ export component MyArtistsPage inherits Rectangle {
                 clicked => { App.open-card("my-artists", i); }
             }
         }
+    }
+    ScrollBar {
+        content-y <=> flick.content-y;
+        content-height: flick.content-height;
     }
 }

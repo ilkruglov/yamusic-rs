@@ -1,0 +1,1789 @@
+// Светлые страницы: каждая — список блоков, вид блока задаёт kind.
+
+import { ListView } from "std-widgets.slint";
+import { Icons, Now, Cover, T } from "common.slint";
+import { Prof } from "profile.slint";
+
+export struct PCard {
+    title: string,
+    subtitle: string,
+    sub2: string,
+    cover: image,
+    cover2: image,
+    round: bool,
+    explicit: bool,
+    bg: color,
+    fg: color,
+    month: string,
+    day: string,
+    weekday: string,
+}
+
+export struct PRow {
+    id: string,
+    title: string,
+    subtitle: string,
+    cover: image,
+    explicit: bool,
+    pos: string,
+}
+
+export struct PBlock {
+    kind: int,
+    title: string,
+    subtitle: string,
+    more: bool,
+    cards: [PCard],
+    rows: [PRow],
+    chips: [string],
+    chip: int,
+    image: image,
+    text: string,
+    bg: color,
+    liked: bool,
+}
+
+export struct PPage {
+    title: string,
+    // Шапка прозрачная поверх фото (исполнитель), название появляется при прокрутке.
+    overlay: bool,
+    // Вместо названия поле поиска.
+    search: bool,
+    has-search: bool,
+    // Корень вкладки: без стрелки назад.
+    root: bool,
+    loading: bool,
+    error: string,
+    blocks: [PBlock],
+}
+
+export global Pages {
+    in property <PPage> page;
+    in property <bool> shown;
+    in-out property <length> scroll;
+    in-out property <string> query;
+    callback card(int, int);
+    callback track(int, int);
+    // Блок появился на экране: пора грузить его картинки.
+    callback appeared(int);
+    callback more(int);
+    callback chip(int, int);
+    // Кнопки шапок: блок и номер кнопки.
+    callback action(int, int);
+    callback back();
+    callback open-search();
+    callback search-edited(string);
+    callback search-submit(string);
+
+    in-out property <bool> viewer-open;
+    in property <image> viewer;
+    in property <string> viewer-title;
+    in property <string> viewer-artist;
+    in property <string> viewer-year;
+    in property <color> viewer-bg: #555;
+
+    in-out property <bool> menu-open;
+    in-out property <bool> pick-open;
+    in property <PRow> menu-track;
+    in property <string> menu-duration;
+    in property <bool> menu-liked;
+    callback menu(int, int);
+    // 0 волна по треку, 1 лайк, 2 следующим, 3 в очередь, 4 поделиться, 6 альбом, 7 исполнитель, 8 дизлайк.
+    callback menu-action(int);
+    callback pick(int);
+
+    in-out property <bool> artists-open;
+    in property <[string]> artist-names;
+    callback pick-artist(int);
+}
+
+// Номера видов блоков, те же в pages.rs.
+export global K {
+    out property <int> cards: 1;
+    out property <int> artists: 2;
+    out property <int> tracks: 3;
+    out property <int> pair: 4;
+    out property <int> promo: 5;
+    out property <int> vibes: 6;
+    out property <int> wave: 7;
+    out property <int> concerts: 8;
+    out property <int> shortcuts: 9;
+    out property <int> link: 10;
+    out property <int> about: 11;
+    out property <int> tiles: 12;
+    out property <int> mixes: 13;
+    out property <int> chips: 14;
+    out property <int> suggest: 15;
+    out property <int> artist-head: 16;
+    out property <int> list-head: 17;
+    out property <int> play: 18;
+    out property <int> banners: 19;
+    out property <int> grid: 20;
+    out property <int> text: 21;
+    out property <int> likes-head: 22;
+    out property <int> rows: 23;
+    out property <int> empty: 24;
+    out property <int> heading: 25;
+    out property <int> album-head: 26;
+    out property <int> numbered: 27;
+    out property <int> releases: 28;
+}
+
+component Heading inherits Rectangle {
+    in property <string> text;
+    in property <bool> more;
+    in property <bool> centered;
+    in property <Icons> icons;
+    callback clicked();
+    height: 56px;
+    HorizontalLayout {
+        x: 16px;
+        y: 16px;
+        width: root.width - 32px;
+        height: 32px;
+        alignment: root.centered ? LayoutAlignment.center : LayoutAlignment.start;
+        spacing: 4px;
+        Text {
+            text: root.text;
+            color: T.fg;
+            font-family: T.display-font;
+            font-weight: 800;
+            font-size: 24px;
+            vertical-alignment: center;
+            overflow: elide;
+            max-width: root.width - 60px;
+        }
+        if root.more: Image {
+            y: 6px;
+            width: 20px;
+            height: 20px;
+            source: root.icons.arrow-right;
+            colorize: T.fg;
+        }
+    }
+    TouchArea {
+        enabled: root.more;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Ряд карточек с прокруткой вбок.
+component CardsRow inherits Flickable {
+    in property <[PCard]> cards;
+    in property <length> size: 140px;
+    in property <bool> round;
+    in property <bool> center;
+    callback clicked(int);
+    height: self.size + (self.center ? 54px : 58px);
+    content-width: 16px + self.cards.length * (self.size + 12px) + 4px;
+    for c[i] in root.cards: Rectangle {
+        x: 16px + i * (root.size + 12px);
+        width: root.size;
+        Cover {
+            y: 0;
+            width: root.size;
+            height: root.size;
+            radius: c.round || root.round ? root.size / 2 : 8px;
+            source: c.cover;
+        }
+        Text {
+            y: root.size + 8px;
+            width: root.size;
+            text: c.title;
+            color: T.fg;
+            font-size: 15px;
+            font-weight: 500;
+            overflow: elide;
+            horizontal-alignment: (root.center || c.round) ? TextHorizontalAlignment.center : TextHorizontalAlignment.left;
+        }
+        Text {
+            y: root.size + 28px;
+            width: root.size;
+            text: c.subtitle;
+            color: T.fg.with-alpha(0.50);
+            font-size: 13px;
+            overflow: elide;
+            horizontal-alignment: (root.center || c.round) ? TextHorizontalAlignment.center : TextHorizontalAlignment.left;
+        }
+        TouchArea {
+            clicked => { root.clicked(i); }
+        }
+    }
+}
+
+component TrackLine inherits Rectangle {
+    in property <PRow> item;
+    in property <bool> plain;
+    in property <Icons> icons;
+    callback clicked();
+    callback menu();
+    height: 76px;
+    property <bool> current: root.item.id != "" && root.item.id == Now.track-id;
+    background: self.current ? T.card : transparent;
+    if root.item.pos != "": Text {
+        x: root.plain ? 16px : 8px;
+        width: root.plain ? 32px : 24px;
+        height: parent.height;
+        text: root.item.pos;
+        color: T.fg;
+        font-size: 15px;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    property <length> left: root.plain ? -12px : root.item.pos != "" ? 36px : 16px;
+    if !root.plain: Cover {
+        x: root.left;
+        y: 12px;
+        width: 52px;
+        height: 52px;
+        source: root.item.cover;
+    }
+    if root.current && !root.plain: Rectangle {
+        x: root.left + 22px;
+        y: 34px;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: #ffdb4d;
+    }
+    HorizontalLayout {
+        x: root.left + 64px;
+        y: root.item.subtitle == "" ? 27px : 16px;
+        width: root.width - root.left - 64px - 48px;
+        height: 22px;
+        spacing: 4px;
+        alignment: start;
+        Text {
+            text: root.item.title;
+            color: T.fg;
+            font-size: 17px;
+            font-weight: 500;
+            overflow: elide;
+        }
+        if root.item.explicit: Image {
+            y: 3px;
+            width: 16px;
+            height: 16px;
+            source: root.icons.explicit;
+            colorize: T.fg.with-alpha(0.50);
+        }
+    }
+    Text {
+        x: root.left + 64px;
+        y: 40px;
+        width: root.width - root.left - 64px - 48px;
+        text: root.item.subtitle;
+        color: T.fg.with-alpha(0.50);
+        font-size: 14px;
+        overflow: elide;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Rectangle {
+        x: root.width - 52px;
+        width: 48px;
+        Image {
+            width: 24px;
+            height: 24px;
+            source: root.icons.more;
+            colorize: T.fg.with-alpha(0.40);
+        }
+        TouchArea {
+            clicked => { root.menu(); }
+        }
+    }
+}
+
+component RoundButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <color> fill: #ffffff33;
+    in property <color> tint: #fff;
+    in property <color> label-color: #fff;
+    callback clicked();
+    width: 96px;
+    height: 100px;
+    Rectangle {
+        x: 16px;
+        width: 64px;
+        height: 64px;
+        y: 0;
+        border-radius: 32px;
+        background: root.fill;
+        Image {
+            width: 28px;
+            height: 28px;
+            source: root.icon;
+            colorize: root.tint;
+        }
+    }
+    Text {
+        y: 72px;
+        width: root.width;
+        text: root.label;
+        color: root.label-color;
+        font-size: 15px;
+        font-weight: 500;
+        horizontal-alignment: center;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// Шапка исполнителя: фото на всю ширину, имя, слушатели и три кнопки.
+component ArtistHead inherits Rectangle {
+    in property <PBlock> block;
+    in property <Icons> icons;
+    callback action(int);
+    height: min(self.width * 1.39, 580px);
+    clip: true;
+    background: root.block.bg;
+    Image {
+        width: root.width;
+        height: root.height;
+        source: root.block.image;
+        image-fit: cover;
+    }
+    Rectangle {
+        y: root.height * 0.45;
+        height: root.height * 0.55;
+        background: @linear-gradient(180deg, root.block.bg.transparentize(1) 0%, root.block.bg.transparentize(0.25) 45%, root.block.bg 100%);
+    }
+    Text {
+        x: 16px;
+        y: root.height - 186px;
+        width: root.width - 32px;
+        text: root.block.title;
+        color: #fff;
+        font-family: "YS Music Headline";
+        font-weight: 900;
+        font-size: 40px;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+    if root.block.subtitle != "": HorizontalLayout {
+        y: root.height - 136px;
+        height: 20px;
+        alignment: center;
+        spacing: 6px;
+        Image {
+            y: 2px;
+            width: 16px;
+            height: 16px;
+            source: root.icons.listeners;
+            colorize: #fff;
+        }
+        Text {
+            text: root.block.subtitle;
+            color: #fff;
+            font-size: 15px;
+            font-weight: 500;
+        }
+    }
+    HorizontalLayout {
+        y: root.height - 108px;
+        height: 100px;
+        alignment: center;
+        spacing: 16px;
+        RoundButton {
+            icon: root.block.liked ? root.icons.liked : root.icons.like;
+            tint: root.block.liked ? #ff0 : #fff;
+            label: root.block.text;
+            clicked => { root.action(0); }
+        }
+        RoundButton {
+            icon: root.icons.trailer;
+            label: "Трейлер";
+            clicked => { root.action(1); }
+        }
+        RoundButton {
+            icon: root.icons.play;
+            fill: #ff0;
+            tint: #000;
+            label: "Слушать";
+            clicked => { root.action(2); }
+        }
+    }
+}
+
+// Шапка альбома на цвете обложки, как у оригинала.
+component AlbumHead inherits Rectangle {
+    in property <PBlock> block;
+    in property <Icons> icons;
+    callback action(int);
+    height: 532px;
+    background: root.block.bg;
+    TouchArea {
+        x: (root.width - 238px) / 2;
+        y: 96px;
+        width: 238px;
+        height: 238px;
+        Cover {
+            radius: 8px;
+            source: root.block.image;
+        }
+        clicked => { root.action(4); }
+    }
+    Text {
+        x: 16px;
+        y: 344px;
+        width: root.width - 32px;
+        text: root.block.title;
+        color: #fffbe6;
+        font-family: T.display-font;
+        font-weight: 800;
+        font-size: 30px;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+    HorizontalLayout {
+        y: 388px;
+        height: 24px;
+        alignment: center;
+        spacing: 8px;
+        if root.block.cards.length > 0: Cover {
+            width: 24px;
+            height: 24px;
+            radius: 12px;
+            source: root.block.cards[0].cover;
+        }
+        Text {
+            text: root.block.subtitle;
+            color: #fffbe6;
+            font-size: 16px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        x: 40px;
+        y: 384px;
+        width: root.width - 80px;
+        height: 32px;
+        clicked => { root.action(5); }
+    }
+    HorizontalLayout {
+        y: 428px;
+        height: 100px;
+        alignment: center;
+        spacing: 16px;
+        RoundButton {
+            icon: root.icons.download;
+            fill: #ffffff33;
+            tint: #fffbe6;
+            label-color: #fffbe6;
+            label: "Скачать";
+            clicked => { root.action(6); }
+        }
+        RoundButton {
+            icon: root.block.liked ? root.icons.liked : root.icons.like;
+            fill: #ffffff33;
+            tint: #fffbe6;
+            label-color: #fffbe6;
+            label: root.block.text;
+            clicked => { root.action(0); }
+        }
+        RoundButton {
+            icon: root.icons.play;
+            fill: #ff0;
+            tint: #000;
+            label-color: #fffbe6;
+            label: "Слушать";
+            clicked => { root.action(2); }
+        }
+    }
+}
+
+// Шапка плейлиста: обложка, название, автор и кнопки.
+component ListHead inherits Rectangle {
+    in property <PBlock> block;
+    in property <Icons> icons;
+    callback action(int);
+    height: 436px;
+    Cover {
+        x: (root.width - 240px) / 2;
+        y: 8px;
+        width: 240px;
+        height: 240px;
+        radius: 12px;
+        source: root.block.image;
+    }
+    Text {
+        x: 16px;
+        y: 264px;
+        width: root.width - 32px;
+        text: root.block.title;
+        color: T.fg;
+        font-family: T.display-font;
+        font-weight: 800;
+        font-size: 26px;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+        overflow: elide;
+        height: 32px;
+    }
+    Text {
+        x: 16px;
+        y: 298px;
+        width: root.width - 32px;
+        text: root.block.subtitle;
+        color: T.fg.with-alpha(0.50);
+        font-size: 15px;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+    HorizontalLayout {
+        y: 326px;
+        height: 100px;
+        alignment: center;
+        spacing: 24px;
+        RoundButton {
+            icon: root.block.liked ? root.icons.liked : root.icons.like;
+            fill: T.card;
+            tint: root.block.liked ? #f5c400 : T.fg;
+            label-color: T.fg.with-alpha(0.50);
+            label: root.block.text;
+            clicked => { root.action(0); }
+        }
+        RoundButton {
+            icon: root.icons.play;
+            fill: #ff0;
+            tint: #000;
+            label-color: T.fg.with-alpha(0.50);
+            label: "Слушать";
+            clicked => { root.action(2); }
+        }
+        RoundButton {
+            icon: root.icons.share;
+            fill: T.card;
+            tint: T.fg;
+            label-color: T.fg.with-alpha(0.50);
+            label: "Поделиться";
+            clicked => { root.action(3); }
+        }
+    }
+}
+
+component Chips inherits Flickable {
+    in property <[string]> chips;
+    in property <int> chip;
+    callback clicked(int);
+    height: 52px;
+    HorizontalLayout {
+        x: 16px;
+        y: 6px;
+        height: 40px;
+        spacing: 8px;
+        alignment: start;
+        for c[i] in root.chips: Rectangle {
+            border-radius: 20px;
+            background: i == root.chip ? T.bg : T.card;
+            border-width: i == root.chip ? 2px : 0;
+            border-color: T.fg;
+            HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 18px;
+                Text {
+                    text: c;
+                    color: T.fg;
+                    font-size: 15px;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                }
+            }
+            TouchArea {
+                clicked => { root.clicked(i); }
+            }
+        }
+    }
+}
+
+// Сетка обложек.
+component Grid inherits Rectangle {
+    in property <[PCard]> cards;
+    in property <int> columns: 2;
+    callback clicked(int);
+    property <length> cell: (self.width - 32px - (self.columns - 1) * 12px) / self.columns;
+    height: ceil(self.cards.length / self.columns) * (self.cell + 64px);
+    for c[i] in root.cards: Rectangle {
+        x: 16px + mod(i, root.columns) * (root.cell + 12px);
+        y: floor(i / root.columns) * (root.cell + 64px);
+        width: root.cell;
+        height: root.cell + 56px;
+        Cover {
+            x: 0;
+            y: 0;
+            width: root.cell;
+            height: root.cell;
+            radius: c.round ? root.cell / 2 : 8px;
+            source: c.cover;
+        }
+        Text {
+            y: root.cell + 8px;
+            width: root.cell;
+            text: c.title;
+            color: T.fg;
+            font-size: 15px;
+            font-weight: 500;
+            overflow: elide;
+            horizontal-alignment: c.round ? center : left;
+        }
+        if !c.round: Text {
+            y: root.cell + 28px;
+            width: root.cell;
+            text: c.subtitle;
+            color: T.fg.with-alpha(0.50);
+            font-size: 13px;
+            overflow: elide;
+        }
+        TouchArea {
+            clicked => { root.clicked(i); }
+        }
+    }
+}
+
+// Концерты: высокие карточки с датой.
+component ConcertGrid inherits Rectangle {
+    in property <[PCard]> cards;
+    in property <int> columns: 2;
+    callback clicked(int);
+    property <length> cell: (self.width - 32px - (self.columns - 1) * 12px) / self.columns;
+    property <length> h: self.cell * 1.4;
+    height: ceil(self.cards.length / self.columns) * (self.h + 88px);
+    for c[i] in root.cards: Rectangle {
+        x: 16px + mod(i, root.columns) * (root.cell + 12px);
+        y: floor(i / root.columns) * (root.h + 88px);
+        width: root.cell;
+        height: root.h + 80px;
+        Cover {
+            y: 0;
+            width: root.cell;
+            height: root.h;
+            radius: 12px;
+            source: c.cover;
+        }
+        Rectangle {
+            x: 12px;
+            y: root.h - 96px;
+            width: 64px;
+            height: 84px;
+            border-radius: 8px;
+            background: #ffe033;
+            VerticalLayout {
+                alignment: center;
+                Text { text: c.month; color: #000; font-size: 14px; horizontal-alignment: center; }
+                Text { text: c.day; color: #000; font-size: 30px; font-weight: 800; font-family: T.display-font; horizontal-alignment: center; }
+                Text { text: c.weekday; color: #000; font-size: 14px; horizontal-alignment: center; }
+            }
+        }
+        Text {
+            y: root.h + 8px;
+            width: root.cell;
+            text: c.title;
+            color: T.fg;
+            font-size: 17px;
+            font-weight: 500;
+            overflow: elide;
+        }
+        Text {
+            y: root.h + 32px;
+            width: root.cell;
+            text: c.subtitle;
+            color: T.fg.with-alpha(0.50);
+            font-size: 14px;
+            overflow: elide;
+        }
+        Text {
+            y: root.h + 52px;
+            width: root.cell;
+            text: c.sub2;
+            color: T.fg.with-alpha(0.50);
+            font-size: 14px;
+            overflow: elide;
+        }
+        TouchArea {
+            clicked => { root.clicked(i); }
+        }
+    }
+}
+
+component BlockView inherits Rectangle {
+    in property <PBlock> block;
+    in property <int> index;
+    in property <Icons> icons;
+    property <int> kind: root.block.kind;
+    property <bool> has-heading: root.block.title != "" && root.kind != K.artist-head && root.kind != K.album-head && root.kind != K.list-head && root.kind != K.likes-head && root.kind != K.wave && root.kind != K.link && root.kind != K.about && root.kind != K.text && root.kind != K.empty;
+    property <length> head-h: root.has-heading ? 56px : 0;
+    property <length> top: root.head-h + (root.block.chips.length > 0 && root.kind != K.chips ? 52px : 0);
+    property <int> columns: clamp(floor((root.width - 20px) / 160px), 2, 6);
+    property <length> cell: (root.width - 32px - (root.columns - 1) * 12px) / root.columns;
+    property <int> card-rows: ceil(root.block.cards.length / root.columns);
+    property <int> pairs: ceil(max(root.block.cards.length, root.block.rows.length) / 2);
+    property <length> body:
+        root.kind == K.cards ? 198px
+        : root.kind == K.artists ? 194px
+        : root.kind == K.mixes ? 150px
+        : root.kind == K.tracks || root.kind == K.numbered ? root.block.rows.length * 76px
+        : root.kind == K.album-head ? 532px
+        : root.kind == K.releases ? root.width - 40px + 52px
+        : root.kind == K.rows ? root.block.cards.length * 76px
+        : root.kind == K.pair ? 84px
+        : root.kind == K.promo ? (root.width - 32px) * 0.56 + 64px
+        : root.kind == K.vibes ? 196px
+        : root.kind == K.chips ? 52px
+        : root.kind == K.wave ? 104px
+        : root.kind == K.concerts ? root.card-rows * (root.cell * 1.4 + 88px)
+        : root.kind == K.shortcuts ? 112px
+        : root.kind == K.link ? 96px
+        : root.kind == K.about ? (root.width - 32px) * 0.9 + 32px
+        : root.kind == K.tiles ? root.pairs * 92px
+        : root.kind == K.suggest ? 72px
+        : root.kind == K.artist-head ? min(root.width * 1.39, 580px)
+        : root.kind == K.list-head ? 436px
+        : root.kind == K.play ? 88px
+        : root.kind == K.banners ? (root.width - 48px) * 0.6 + 64px
+        : root.kind == K.grid ? root.card-rows * (root.cell + 64px)
+        : root.kind == K.text ? txt.preferred-height + 16px
+        : root.kind == K.empty ? 120px
+        : root.kind == K.likes-head ? 108px
+        : 0;
+    height: root.top + root.body;
+    init => { Pages.appeared(root.index); }
+    changed index => { Pages.appeared(root.index); }
+
+    if root.has-heading: Heading {
+        y: 0;
+        centered: root.kind == K.releases;
+        text: root.block.title;
+        more: root.block.more;
+        icons: root.icons;
+        clicked => { Pages.more(root.index); }
+    }
+
+    if root.block.chips.length > 0 && root.kind != K.chips: Chips {
+        y: root.head-h;
+        chips: root.block.chips;
+        chip: root.block.chip;
+        clicked(i) => { Pages.chip(root.index, i); }
+    }
+
+    if root.kind == K.cards || root.kind == K.artists: CardsRow {
+        y: root.top;
+        cards: root.block.cards;
+        round: root.kind == K.artists;
+        center: root.kind == K.artists;
+        clicked(i) => { Pages.card(root.index, i); }
+    }
+    if root.kind == K.mixes: CardsRow {
+        y: root.top;
+        cards: root.block.cards;
+        size: 96px;
+        center: true;
+        clicked(i) => { Pages.card(root.index, i); }
+    }
+    if root.kind == K.tracks || root.kind == K.numbered: VerticalLayout {
+        y: root.top;
+        height: root.body;
+        alignment: start;
+        for r[i] in root.block.rows: TrackLine {
+            item: r;
+            plain: root.kind == K.numbered;
+            icons: root.icons;
+            clicked => { Pages.track(root.index, i); }
+            menu => { Pages.menu(root.index, i); }
+        }
+    }
+    if root.kind == K.rows: VerticalLayout {
+        y: root.top;
+        height: root.body;
+        alignment: start;
+        for c[i] in root.block.cards: Rectangle {
+            height: 76px;
+            Cover {
+                x: 16px;
+                y: 10px;
+                width: 56px;
+                height: 56px;
+                radius: c.round ? 28px : 6px;
+                source: c.cover;
+            }
+            Text {
+                x: 84px;
+                y: 16px;
+                width: parent.width - 100px;
+                text: c.title;
+                color: T.fg;
+                font-size: 17px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            Text {
+                x: 84px;
+                y: 40px;
+                width: parent.width - 100px;
+                text: c.subtitle;
+                color: T.fg.with-alpha(0.50);
+                font-size: 14px;
+                overflow: elide;
+            }
+            TouchArea {
+                clicked => { Pages.card(root.index, i); }
+            }
+        }
+    }
+    if root.kind == K.pair: Rectangle {
+        y: root.top;
+        height: 84px;
+        for c[i] in root.block.cards: Rectangle {
+            x: 16px + i * (parent.width - 32px) / 2;
+            width: (parent.width - 32px) / 2;
+            Rectangle {
+                x: 8px;
+                y: 10px;
+                width: 56px;
+                height: 56px;
+                border-radius: 6px;
+                background: T.card;
+            }
+            Cover {
+                x: 0;
+                y: 16px;
+                width: 56px;
+                height: 56px;
+                source: c.cover;
+            }
+            Text {
+                x: 80px;
+                y: 18px;
+                width: parent.width - 84px;
+                text: c.title;
+                color: T.fg;
+                font-size: 17px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            Text {
+                x: 80px;
+                y: 42px;
+                width: parent.width - 84px;
+                height: 36px;
+                text: c.subtitle;
+                color: T.fg.with-alpha(0.50);
+                font-size: 14px;
+                wrap: word-wrap;
+                overflow: elide;
+            }
+            TouchArea {
+                clicked => { Pages.card(root.index, i); }
+            }
+        }
+    }
+    if root.kind == K.promo: promo := Flickable {
+        y: root.top;
+        property <length> w: self.width - 32px;
+        height: self.w * 0.56 + 64px;
+        content-width: 16px + root.block.cards.length * (self.w + 12px) + 4px;
+        for c[i] in root.block.cards: Rectangle {
+            x: 16px + i * (promo.w + 12px);
+            width: promo.w;
+            Rectangle {
+                height: promo.w * 0.56;
+                border-radius: 12px;
+                clip: true;
+                background: c.bg;
+                Image {
+                    width: promo.width;
+                    height: parent.height;
+                    source: c.cover2;
+                    image-fit: cover;
+                }
+                Cover {
+                    x: 16px;
+                    y: parent.height - 16px - self.height;
+                    width: 104px;
+                    height: 104px;
+                    source: c.cover;
+                }
+                Rectangle {
+                    x: promo.width - 16px - 124px;
+                    y: parent.height - 16px - 48px;
+                    width: 124px;
+                    height: 48px;
+                    border-radius: 24px;
+                    background: #fff;
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Image {
+                            y: 14px;
+                            width: 20px;
+                            height: 20px;
+                            source: root.icons.play-small;
+                            colorize: #000;
+                        }
+                        Text {
+                            text: "Слушать";
+                            color: #000;
+                            font-size: 17px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            Text {
+                y: promo.w * 0.56 + 10px;
+                width: promo.width;
+                text: c.title;
+                color: T.fg;
+                font-size: 18px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            Text {
+                y: promo.w * 0.56 + 34px;
+                width: promo.width;
+                text: c.subtitle;
+                color: T.fg.with-alpha(0.50);
+                font-size: 15px;
+                overflow: elide;
+            }
+            TouchArea {
+                clicked => { Pages.card(root.index, i); }
+            }
+        }
+    }
+    if root.kind == K.vibes: Flickable {
+        y: root.top;
+        height: 196px;
+        content-width: 16px + root.block.cards.length * 152px + 4px;
+        for c[i] in root.block.cards: Rectangle {
+            x: 16px + i * 152px;
+            y: 8px;
+            width: 140px;
+            height: 180px;
+            border-radius: 16px;
+            clip: true;
+            background: c.bg;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: c.cover;
+                image-fit: cover;
+            }
+            VerticalLayout {
+                padding: 12px;
+                alignment: end;
+                Text {
+                    text: c.sub2;
+                    color: c.fg.transparentize(0.3);
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: c.title;
+                    color: c.fg;
+                    font-size: 17px;
+                    font-weight: 700;
+                    wrap: word-wrap;
+                }
+            }
+            TouchArea {
+                clicked => { Pages.card(root.index, i); }
+            }
+        }
+    }
+    if root.kind == K.chips: Chips {
+        chips: root.block.chips;
+        chip: root.block.chip;
+        clicked(i) => { Pages.chip(root.index, i); }
+    }
+    if root.kind == K.wave: Rectangle {
+        y: root.top;
+        height: 104px;
+        Rectangle {
+            x: 16px;
+            y: 12px;
+            width: parent.width - 32px;
+            height: 80px;
+            border-radius: 20px;
+            clip: true;
+            background: @linear-gradient(100deg, root.block.bg.darker(0.1) 0%, root.block.bg.brighter(0.25) 55%, root.block.bg 100%);
+            if root.block.cards.length > 0: Cover {
+                x: 12px;
+                y: 12px;
+                width: 56px;
+                height: 56px;
+                source: root.block.cards[0].cover;
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: root.block.title;
+                    color: #ffffffcc;
+                    font-size: 15px;
+                    horizontal-alignment: center;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Image {
+                        y: 5px;
+                        width: 18px;
+                        height: 18px;
+                        source: root.icons.play-small;
+                        colorize: #fff;
+                    }
+                    Text {
+                        text: root.block.subtitle;
+                        color: #fff;
+                        font-family: "YS Music Headline";
+                        font-weight: 900;
+                        font-size: 22px;
+                        overflow: elide;
+                    }
+                }
+            }
+            TouchArea {
+                clicked => { Pages.action(root.index, 0); }
+            }
+        }
+    }
+    if root.kind == K.concerts: ConcertGrid {
+        y: root.top;
+        columns: root.columns;
+        cards: root.block.cards;
+        clicked(i) => { Pages.card(root.index, i); }
+    }
+    if root.kind == K.shortcuts: Rectangle {
+        y: root.top;
+        height: 112px;
+        for c[i] in root.block.cards: Rectangle {
+            x: 8px + i * (parent.width - 16px) / 4;
+            width: (parent.width - 16px) / 4;
+            Rectangle {
+                x: (parent.width - 64px) / 2;
+                y: 8px;
+                width: 64px;
+                height: 64px;
+                border-radius: 20px;
+                background: @linear-gradient(135deg, c.bg 0%, c.fg 100%);
+                Image {
+                    width: 32px;
+                    height: 32px;
+                    source: c.cover;
+                    colorize: #fff;
+                }
+            }
+            Text {
+                y: 80px;
+                width: parent.width;
+                text: c.title;
+                color: T.fg;
+                font-size: 15px;
+                font-weight: 500;
+                horizontal-alignment: center;
+            }
+            TouchArea {
+                clicked => { Pages.card(root.index, i); }
+            }
+        }
+    }
+    if root.kind == K.link: Rectangle {
+        y: root.top;
+        height: 96px;
+        Rectangle {
+            x: 16px;
+            y: 16px;
+            width: 64px;
+            height: 64px;
+            border-radius: 32px;
+            background: #fc3f1d;
+            Image {
+                width: 28px;
+                height: 28px;
+                source: root.icons.tab-home;
+                colorize: #fff;
+            }
+        }
+        Text {
+            x: 96px;
+            y: 26px;
+            width: parent.width - 150px;
+            text: root.block.title;
+            color: T.fg;
+            font-size: 17px;
+            font-weight: 500;
+            overflow: elide;
+        }
+        Text {
+            x: 96px;
+            y: 50px;
+            width: parent.width - 150px;
+            text: root.block.subtitle;
+            color: T.fg.with-alpha(0.50);
+            font-size: 15px;
+            overflow: elide;
+        }
+        Image {
+            x: parent.width - 44px;
+            y: 36px;
+            width: 24px;
+            height: 24px;
+            source: root.icons.arrow-right;
+            colorize: T.fg.with-alpha(0.40);
+        }
+        TouchArea {
+            clicked => { Pages.more(root.index); }
+        }
+    }
+    if root.kind == K.about: Rectangle {
+        y: root.top;
+        height: (self.width - 32px) * 0.9 + 32px;
+        Rectangle {
+            x: 16px;
+            y: 16px;
+            width: parent.width - 32px;
+            height: parent.height - 32px;
+            border-radius: 16px;
+            clip: true;
+            background: #333;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.block.image;
+                image-fit: cover;
+            }
+            Rectangle {
+                y: parent.height * 0.6;
+                height: parent.height * 0.4;
+                background: @linear-gradient(180deg, #00000000 0%, #000000b3 100%);
+            }
+            Text {
+                x: 20px;
+                y: parent.height - 72px;
+                text: root.block.title;
+                color: #fff;
+                font-size: 22px;
+                font-weight: 700;
+            }
+            Text {
+                x: 20px;
+                y: parent.height - 40px;
+                text: "Ещё";
+                color: #ffffff99;
+                font-size: 15px;
+            }
+            TouchArea {
+                clicked => { Pages.more(root.index); }
+            }
+        }
+    }
+    if root.kind == K.tiles: Rectangle {
+        y: root.top;
+        property <length> cell: (self.width - 44px) / 2;
+        height: ceil(root.block.cards.length / 2) * 92px;
+        for c[i] in root.block.cards: Rectangle {
+            x: 16px + mod(i, 2) * (parent.cell + 12px);
+            y: floor(i / 2) * 92px;
+            width: parent.cell;
+            height: 80px;
+            Rectangle {
+                x: 0;
+                width: 72px;
+                height: 72px;
+                y: 4px;
+                border-radius: 12px;
+                background: T.card;
+                Image {
+                    width: c.sub2 == "icon" ? 32px : parent.width;
+                    height: c.sub2 == "icon" ? 32px : parent.height;
+                    source: c.cover;
+                    image-fit: cover;
+                    colorize: c.sub2 == "icon" ? T.fg : transparent;
+                }
+            }
+            Text {
+                x: 84px;
+                y: c.subtitle == "" ? 28px : 14px;
+                width: parent.width - 84px;
+                text: c.title;
+                color: T.fg;
+                font-size: 17px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            Text {
+                x: 84px;
+                y: 38px;
+                width: parent.width - 84px;
+                height: 36px;
+                text: c.subtitle;
+                color: T.fg.with-alpha(0.50);
+                font-size: 14px;
+                wrap: word-wrap;
+                overflow: elide;
+            }
+            TouchArea {
+                clicked => { Pages.card(root.index, i); }
+            }
+        }
+    }
+    if root.kind == K.suggest: Flickable {
+        y: root.top;
+        height: 72px;
+        content-width: 16px + root.block.cards.length * 220px;
+        for c[i] in root.block.cards: Rectangle {
+            x: 16px + i * 220px;
+            width: 208px;
+            Rectangle {
+                x: 0;
+                y: 12px;
+                width: 1px;
+                height: 48px;
+                background: i == 0 ? transparent : T.fg.with-alpha(0.08);
+            }
+            Text {
+                x: 12px;
+                y: 12px;
+                width: parent.width - 16px;
+                height: 48px;
+                text: c.title;
+                color: T.fg;
+                font-size: 17px;
+                font-weight: 500;
+                wrap: word-wrap;
+                overflow: elide;
+            }
+            TouchArea {
+                clicked => { Pages.card(root.index, i); }
+            }
+        }
+    }
+    if root.kind == K.artist-head: ArtistHead {
+        y: root.top;
+        block: root.block;
+        icons: root.icons;
+        action(n) => { Pages.action(root.index, n); }
+    }
+    if root.kind == K.album-head: AlbumHead {
+        y: root.top;
+        block: root.block;
+        icons: root.icons;
+        action(n) => { Pages.action(root.index, n); }
+    }
+    // Новый релиз: фото исполнителя в круге, снизу на него заходит карточка альбома.
+    if root.kind == K.releases: rel := Flickable {
+        y: root.top;
+        property <length> w: self.width - 24px;
+        property <length> d: self.w - 16px;
+        height: root.body;
+        content-width: 12px + root.block.cards.length * (self.w + 8px) + 4px;
+        for c[i] in root.block.cards: Rectangle {
+            x: 12px + i * (rel.w + 8px);
+            y: 0;
+            width: rel.w;
+            height: rel.height;
+            Cover {
+                x: 8px;
+                y: 0;
+                width: rel.d;
+                height: rel.d;
+                radius: rel.d / 2;
+                source: c.cover2;
+            }
+            Text {
+                x: 8px;
+                y: rel.d - 136px;
+                width: rel.d;
+                text: c.subtitle;
+                color: #fff;
+                font-family: "YS Music Headline";
+                font-weight: 900;
+                font-size: 30px;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+            Rectangle {
+                x: 0;
+                y: rel.d - 80px;
+                width: rel.w;
+                height: 102px;
+                border-radius: 14px;
+                background: c.bg;
+                Cover {
+                    x: 12px;
+                    y: 10px;
+                    width: 82px;
+                    height: 82px;
+                    radius: 6px;
+                    source: c.cover;
+                }
+                Text {
+                    x: 108px;
+                    y: 28px;
+                    width: parent.width - 170px;
+                    text: c.title;
+                    color: #fff;
+                    font-size: 17px;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+                Text {
+                    x: 108px;
+                    y: 52px;
+                    width: parent.width - 170px;
+                    text: c.sub2;
+                    color: #ffffff99;
+                    font-size: 15px;
+                    overflow: elide;
+                }
+                Rectangle {
+                    x: parent.width - 56px;
+                    y: 31px;
+                    width: 40px;
+                    height: 40px;
+                    border-radius: 20px;
+                    background: #ffffffd9;
+                    Image {
+                        width: 22px;
+                        height: 22px;
+                        source: root.icons.play-small;
+                        colorize: T.fg;
+                    }
+                }
+            }
+            TouchArea {
+                clicked => { Pages.card(root.index, i); }
+            }
+        }
+    }
+    if root.kind == K.list-head: ListHead {
+        y: root.top;
+        block: root.block;
+        icons: root.icons;
+        action(n) => { Pages.action(root.index, n); }
+    }
+    if root.kind == K.play: Rectangle {
+        y: root.top;
+        height: 88px;
+        Rectangle {
+            x: (parent.width - 80px) / 2;
+            y: 4px;
+            width: 80px;
+            height: 80px;
+            border-radius: 40px;
+            background: #ff0;
+            Image {
+                width: 36px;
+                height: 36px;
+                source: root.icons.play;
+                colorize: T.fg;
+            }
+            TouchArea {
+                clicked => { Pages.action(root.index, 2); }
+            }
+        }
+    }
+    if root.kind == K.banners: banners := Flickable {
+        y: root.top;
+        property <length> w: self.width - 48px;
+        height: self.w * 0.6 + 64px;
+        content-width: 16px + root.block.cards.length * (self.w + 12px) + 4px;
+        for c[i] in root.block.cards: Rectangle {
+            x: 16px + i * (banners.w + 12px);
+            width: banners.w;
+            Cover {
+                width: banners.w;
+                height: banners.w * 0.6;
+                radius: 12px;
+                source: c.cover;
+            }
+            Text {
+                y: banners.w * 0.6 + 10px;
+                width: banners.width;
+                text: c.title;
+                color: T.fg;
+                font-size: 17px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            Text {
+                y: banners.w * 0.6 + 32px;
+                width: banners.width;
+                text: c.subtitle;
+                color: T.fg.with-alpha(0.50);
+                font-size: 14px;
+                overflow: elide;
+            }
+            TouchArea {
+                clicked => { Pages.card(root.index, i); }
+            }
+        }
+    }
+    if root.kind == K.grid: Grid {
+        y: root.top;
+        columns: root.columns;
+        cards: root.block.cards;
+        clicked(i) => { Pages.card(root.index, i); }
+    }
+    txt := Text {
+        visible: root.kind == K.text;
+        x: 16px;
+        y: root.top;
+        width: root.width - 32px;
+        text: root.kind == K.text ? root.block.text : "";
+        color: T.fg;
+        font-size: 16px;
+        wrap: word-wrap;
+    }
+    if root.kind == K.empty: Text {
+        y: root.top;
+        height: 120px;
+        text: root.block.text;
+        color: T.fg.with-alpha(0.50);
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+    if root.kind == K.likes-head: Rectangle {
+        y: root.top;
+        height: 108px;
+        Image {
+            x: 12px;
+            y: 12px;
+            width: 84px;
+            height: 84px;
+            source: root.block.image;
+            image-fit: contain;
+        }
+        HorizontalLayout {
+            x: 108px;
+            y: 26px;
+            height: 32px;
+            spacing: 4px;
+            alignment: start;
+            Text {
+                text: root.block.title;
+                color: T.fg;
+                font-family: T.display-font;
+                font-weight: 800;
+                font-size: 26px;
+                vertical-alignment: center;
+            }
+            Image {
+                y: 6px;
+                width: 20px;
+                height: 20px;
+                source: root.icons.arrow-right;
+                colorize: T.fg;
+            }
+        }
+        Text {
+            x: 108px;
+            y: 62px;
+            text: root.block.subtitle;
+            color: T.fg.with-alpha(0.50);
+            font-size: 15px;
+        }
+        TouchArea {
+            clicked => { Pages.more(root.index); }
+        }
+    }
+}
+
+// Мини-плеер над вкладками.
+export component MiniPlayer inherits Rectangle {
+    in property <Icons> icons;
+    callback open();
+    height: 60px;
+    border-radius: 14px;
+    clip: true;
+    background: T.mini;
+    Rectangle {
+        x: 0;
+        width: parent.width * clamp(Now.progress, 0, 1);
+        background: T.mini-fill;
+    }
+    Cover {
+        x: 10px;
+        y: 8px;
+        width: 44px;
+        height: 44px;
+        source: Now.cover;
+    }
+    Text {
+        x: 66px;
+        y: 10px;
+        width: parent.width - 66px - 104px;
+        text: Now.title;
+        color: T.fg;
+        font-size: 17px;
+        font-weight: 500;
+        overflow: elide;
+    }
+    Text {
+        x: 66px;
+        y: 32px;
+        width: parent.width - 66px - 104px;
+        text: Now.artists;
+        color: T.fg.with-alpha(0.50);
+        font-size: 14px;
+        overflow: elide;
+    }
+    TouchArea {
+        clicked => { root.open(); }
+    }
+    Rectangle {
+        x: parent.width - 100px;
+        width: 48px;
+        Image {
+            width: 24px;
+            height: 24px;
+            source: Now.liked ? root.icons.liked : root.icons.like;
+            colorize: Now.liked ? #f5c400 : T.fg;
+        }
+        TouchArea {
+            clicked => { Now.like(); }
+        }
+    }
+    Rectangle {
+        x: parent.width - 52px;
+        width: 48px;
+        Image {
+            width: 26px;
+            height: 26px;
+            source: Now.playing ? root.icons.pause : root.icons.play;
+            colorize: T.fg;
+        }
+        TouchArea {
+            clicked => { Now.play-pause(); }
+        }
+    }
+}
+
+export component PageView inherits Rectangle {
+    in property <Icons> icons;
+    in property <length> bottom: 160px;
+    background: T.bg;
+    property <PPage> page: Pages.page;
+    property <length> bar-y: 44px;
+    property <length> bar-h: 56px;
+    TouchArea { }
+
+    list := ListView {
+        y: root.page.overlay ? 0 : root.bar-y + root.bar-h;
+        height: root.height - self.y;
+        content-y <=> Pages.scroll;
+        mouse-drag-pan-enabled: true;
+        for b[i] in root.page.blocks: Rectangle {
+            height: blk.height + (i == root.page.blocks.length - 1 ? root.bottom : 0);
+            blk := BlockView {
+                x: (parent.width - self.width) / 2;
+                y: 0;
+                width: min(parent.width, 1120px);
+                block: b;
+                index: i;
+                icons: root.icons;
+            }
+        }
+    }
+    if root.page.loading: Text {
+        y: list.y;
+        height: 160px;
+        text: "Загружаем…";
+        color: T.fg.with-alpha(0.40);
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if root.page.error != "": Text {
+        x: 16px;
+        y: list.y;
+        width: root.width - 32px;
+        height: 160px;
+        text: root.page.error;
+        color: T.fg.with-alpha(0.50);
+        font-size: 15px;
+        wrap: word-wrap;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    // Шапка: над фото исполнителя прозрачная, пока страницу не прокрутили.
+    property <length> head-h: root.page.blocks.length > 0 && root.page.blocks[0].kind == K.album-head ? 532px : min(root.width * 1.39, 580px);
+    property <bool> solid: !root.page.overlay || -list.content-y > root.head-h - root.bar-y - root.bar-h - 40px;
+    Rectangle {
+        y: 0;
+        height: root.bar-y + root.bar-h;
+        background: root.solid ? T.bg : transparent;
+    }
+    if !root.page.search: Text {
+        x: root.page.root ? 16px : 64px;
+        y: root.bar-y;
+        width: root.width - self.x - 64px;
+        height: root.bar-h;
+        text: root.page.title;
+        visible: root.solid;
+        color: T.fg;
+        font-family: T.display-font;
+        font-weight: 800;
+        font-size: 22px;
+        horizontal-alignment: root.page.root ? left : center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    if !root.page.root && !root.page.search: Rectangle {
+        x: 4px;
+        y: root.bar-y + 4px;
+        width: 48px;
+        height: 48px;
+        Path {
+            width: 24px;
+            height: 24px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            stroke: root.solid ? T.fg : #fff;
+            stroke-width: 2px;
+            commands: "M20 12H4 M10 5l-7 7 7 7";
+        }
+        TouchArea {
+            clicked => { Pages.back(); }
+        }
+    }
+    if root.page.root && root.page.title == "Коллекция": Rectangle {
+        x: root.width - 100px;
+        y: root.bar-y + 4px;
+        width: 48px;
+        height: 48px;
+        Image {
+            width: 24px;
+            height: 24px;
+            source: root.icons.profile;
+            colorize: T.fg;
+        }
+        TouchArea {
+            clicked => { Prof.screen = 1; }
+        }
+    }
+    if root.page.has-search && !root.page.search: Rectangle {
+        x: root.width - 56px;
+        y: root.bar-y + 4px;
+        width: 48px;
+        height: 48px;
+        Image {
+            width: 24px;
+            height: 24px;
+            source: root.icons.search;
+            colorize: root.solid ? T.fg : #fff;
+        }
+        TouchArea {
+            clicked => { Pages.open-search(); }
+        }
+    }
+    if root.page.search: Rectangle {
+        x: 12px;
+        y: root.bar-y + 2px;
+        width: root.width - 24px;
+        height: 52px;
+        border-radius: 26px;
+        background: T.bg;
+        border-width: 1.5px;
+        border-color: #d9c6ff;
+        Rectangle {
+            x: 2px;
+            width: 48px;
+            Path {
+                width: 24px;
+                height: 24px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                stroke: T.fg;
+                stroke-width: 2px;
+                commands: "M15 4l-8 8 8 8";
+            }
+            TouchArea {
+                clicked => { Pages.back(); }
+            }
+        }
+        FocusScope {
+            x: 48px;
+            width: parent.width - 64px;
+            height: parent.height;
+            capture-key-pressed(e) => {
+                if e.text == Key.Back {
+                    Pages.back();
+                    return accept;
+                }
+                reject
+            }
+            TextInput {
+                text <=> Pages.query;
+                color: T.fg;
+                font-size: 17px;
+                vertical-alignment: center;
+                single-line: true;
+                edited => { Pages.search-edited(self.text); }
+                accepted => { Pages.search-submit(self.text); }
+            }
+        }
+        if Pages.query == "": Text {
+            x: 50px;
+            width: parent.width - 64px;
+            height: parent.height;
+            text: "Трек, альбом, исполнитель, подкаст";
+            color: T.fg.with-alpha(0.40);
+            font-size: 17px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    if Pages.viewer-open: viewer := Rectangle {
+        property <bool> split: root.width >= 600px && root.width > root.height;
+        property <length> art-size: min(root.width - 32px, 520px, max(64px, root.height - (self.split ? 120px : 280px)));
+        background: @linear-gradient(180deg, Pages.viewer-bg 0%, Pages.viewer-bg.darker(0.6) 100%);
+        TouchArea { }
+        Rectangle {
+            x: 8px;
+            y: root.bar-y + 4px;
+            width: 48px;
+            height: 48px;
+            Path {
+                width: 24px;
+                height: 24px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                stroke: #fff;
+                stroke-width: 2px;
+                commands: "M5 5l14 14 M19 5L5 19";
+            }
+            TouchArea {
+                clicked => { Pages.viewer-open = false; }
+            }
+        }
+        Image {
+            x: viewer.split ? (root.width / 2 - self.width) / 2 : (root.width - self.width) / 2;
+            y: viewer.split ? (root.height - self.height) / 2 : root.bar-y + 64px;
+            width: viewer.art-size;
+            height: self.width;
+            source: Pages.viewer;
+            image-fit: cover;
+        }
+        VerticalLayout {
+            x: viewer.split ? root.width / 2 : (root.width - self.width) / 2;
+            y: viewer.split ? (root.height - self.preferred-height) / 2 : root.bar-y + 80px + viewer.art-size;
+            width: viewer.split ? root.width / 2 - 24px : viewer.art-size;
+            spacing: 14px;
+            alignment: start;
+            Text { text: Pages.viewer-title; color: #fff; font-size: 17px; wrap: word-wrap; font-weight: 700; }
+            Text { text: Pages.viewer-artist; color: #ffffff99; font-size: 17px; wrap: word-wrap; }
+            Text { text: Pages.viewer-year; color: #fff; font-size: 17px; wrap: word-wrap; }
+        }
+    }
+}

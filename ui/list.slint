@@ -1,9 +1,9 @@
 // Альбом, плейлист и «Мне нравится»: шапка, список треков, редактирование плейлиста.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, Shimmer, NavArrows, ExplicitMark, Field, ArtistLinks } from "widgets.slint";
+import { Icons, Icon, Cover, Shimmer, NavArrows, Field, ArtistLinks, ScrollBar } from "widgets.slint";
 import { T, App, TrackItem } from "state.slint";
-import { TrackRow } from "rows.slint";
+import { TrackRow, AlbumTrackRow } from "rows.slint";
 
 component HeaderButton inherits Rectangle {
     in property <image> icon;
@@ -38,7 +38,7 @@ component HeaderButton inherits Rectangle {
     }
 }
 
-export component ListPage inherits Rectangle {
+component ListContent inherits TouchArea {
     property <bool> album: App.list-kind == "album";
     property <bool> likes: App.list-kind == "likes";
     property <bool> playlist: App.list-kind == "playlist";
@@ -51,6 +51,9 @@ export component ListPage inherits Rectangle {
     // Описание плейлиста переносится (до трёх строк) и сдвигает всё, что ниже.
     property <length> desc-extra: playlist ? max(0px, desc.height - one-line.preferred-height) : 0px;
     property <bool> own: playlist && App.list-own;
+    // Фокус у поля «Поиск трека». Нужен полосе прокрутки, а само поле внутри `if` и
+    // отсюда не видно.
+    property <bool> filter-focused;
     // В режиме правки поле названия на 8 px ниже обычного заголовка, всё ниже сдвигается на 8 px;
     // при правке описания под полем 120 px текста и кнопки «Сохранить» / «Отменить».
     property <length> edit-shift: App.list-edit == 1 ? 8px : 0px;
@@ -59,12 +62,9 @@ export component ListPage inherits Rectangle {
     property <length> rows-y: album ? buttons-y + 94px : search-y + 57px;
     property <length> row-x: playlist && App.list-own ? pad + 12px : pad;
     property <length> row-h: 56px;
-
-    Rectangle {
-        y: 0;
-        height: 340px;
-        background: @linear-gradient(180deg, App.list-tint 0%, App.list-tint.with-alpha(0) 100%);
-    }
+    // Flickable передаёт нажатие с задержкой, поэтому строку под курсором определяем по координатам.
+    property <int> hovered-row: self.has-hover && self.mouse-x >= row-x && self.mouse-x < self.width - 33px
+        ? floor((self.mouse-y - flick.content-y - rows-y) / row-h) : -1;
 
     flick := Flickable {
         content-height: rows-y + App.list-count * row-h + (album && App.list-label != "" ? 80px : 32px);
@@ -78,6 +78,12 @@ export component ListPage inherits Rectangle {
         init => { App.list-viewport(first, capacity); }
         changed first => { App.list-viewport(first, capacity); }
         changed capacity => { App.list-viewport(first, capacity); }
+
+        Rectangle {
+            y: 0;
+            height: 340px;
+            background: @linear-gradient(180deg, App.list-tint 0%, App.list-tint.with-alpha(0) 100%);
+        }
 
         Cover {
             x: pad;
@@ -376,6 +382,8 @@ export component ListPage inherits Rectangle {
                 vertical-alignment: center;
                 edited => { App.filter-changed(self.text); }
             }
+            property <bool> focused: field.has-focus;
+            changed focused => { root.filter-focused = self.focused; }
             if App.list-filter != "": Icon {
                 x: parent.width - 32px;
                 source: Icons.close-small;
@@ -413,6 +421,7 @@ export component ListPage inherits Rectangle {
             height: row-h;
             if !album: TrackRow {
                 width: parent.width;
+                hot: idx == root.hovered-row;
                 item: App.tracks[k];
                 block: "list";
                 index: idx;
@@ -422,85 +431,16 @@ export component ListPage inherits Rectangle {
                 like => { App.like-track(idx); }
                 remove => { App.list-remove-track(idx); }
             }
-            if album: Rectangle {
-                property <TrackItem> item: App.tracks[k];
-                property <bool> current: idx == App.list-current;
-                border-radius: Theme.radius-size-m;
-                property <bool> hot: ta.has-hover || like-ta.has-hover || more-ta.has-hover;
-                background: current || hot ? Theme.controls-color-secondary-default-disabled : transparent;
-                ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-list(idx); } }
-                if hot || current: Icon {
-                    x: 8px;
-                    source: current && App.can-pause ? Icons.pause-filled-xs : Icons.play-filled-xs;
-                    size: 28px;
-                    colorize: Theme.controls-color-primary-text-enabled;
-                }
-                if !hot && !current: Text {
-                    x: 8px;
-                    width: 28px;
-                    horizontal-alignment: center;
-                    text: idx + 1;
-                    font-size: Theme.font-size-label-m;
-                    color: Theme.controls-color-primary-text-enabled;
-                }
-                HorizontalLayout {
-                    x: 44px;
-                    width: parent.width - 44px - 136px;
-                    height: 20px;
-                    spacing: 4px;
-                    Text {
-                        text: item.title;
-                        overflow: elide;
-                        horizontal-stretch: 0;
-                        vertical-alignment: center;
-                        font-size: Theme.font-size-label-m;
-                        font-weight: 500;
-                        color: current ? Theme.controls-color-primary-text-hovered : Theme.controls-color-primary-text-enabled-variant;
-                    }
-                    if item.version != "": Text {
-                        text: item.version;
-                        horizontal-stretch: 0;
-                        vertical-alignment: center;
-                        font-size: Theme.font-size-label-m;
-                        font-weight: 500;
-                        color: Theme.controls-color-primary-text-enabled;
-                    }
-                    if item.explicit: ExplicitMark { y: 1px; }
-                    Rectangle { horizontal-stretch: 1; }
-                }
-                Rectangle {
-                    x: parent.width - 111px;
-                    width: 40px;
-                    height: 40px;
-                    Icon {
-                        source: item.liked ? Icons.liked-small : Icons.like-small;
-                        size: 20px;
-                        colorize: Theme.controls-color-primary-text-enabled;
-                    }
-                    like-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.like-track(idx); } }
-                }
-                Rectangle {
-                    x: parent.width - 40px - 8px;
-                    width: 40px;
-                    height: 40px;
-                    Icon {
-                        visible: hot;
-                        source: Icons.more-small;
-                        size: 20px;
-                        colorize: more-ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
-                    }
-                    more-ta := TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => { App.row-menu("list", idx, self.absolute-position.x + 20px, self.absolute-position.y + 40px); }
-                    }
-                }
-                if !hot: Text {
-                    x: parent.width - 18px - self.width;
-                    text: item.duration;
-                    font-size: Theme.font-size-label-m;
-                    font-weight: 500;
-                    color: Theme.controls-color-primary-text-enabled;
-                }
+            if album: AlbumTrackRow {
+                width: parent.width;
+                hot: idx == root.hovered-row;
+                item: App.tracks[k];
+                current: idx == App.list-current;
+                pos: idx + 1;
+                block: "list";
+                index: idx;
+                play => { App.play-list(idx); }
+                like => { App.like-track(idx); }
             }
         }
 
@@ -514,10 +454,10 @@ export component ListPage inherits Rectangle {
             Text { text: App.list-label; font-size: Theme.font-size-label-s; font-weight: 500; color: Theme.controls-color-primary-text-enabled-variant; vertical-alignment: center; }
         }
     }
-
-    NavArrows {
-        x: pad;
-        y: 13px;
+    ScrollBar {
+        content-y <=> flick.content-y;
+        content-height: flick.content-height;
+        field-focused: (!album && filter-focused) || title-field.has-focus || desc-field.has-focus;
     }
 
     function edit-title() {
@@ -553,4 +493,9 @@ export component ListPage inherits Rectangle {
         }
         App.list-edit-request = 0;
     }
+}
+
+export component ListPage inherits Rectangle {
+    ListContent { }
+    NavArrows { x: 25px; y: 13px; }
 }

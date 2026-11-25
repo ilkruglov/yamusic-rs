@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Окно под статус-баром, как на Android 15: вёрстка отсчитывает шапку от его высоты. -->
+    <style name="App" parent="@android:style/Theme.Black.NoTitleBar">
+        <item name="android:windowTranslucentStatus">true</item>
+    </style>
+</resources>

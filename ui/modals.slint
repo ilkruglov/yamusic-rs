@@ -1,0 +1,117 @@
+// Окно «Горячие клавиши».
+
+import { Theme } from "theme.slint";
+import { App, T } from "state.slint";
+import { Icons, Icon } from "widgets.slint";
+
+// Клавиша: `ShortcutsModal_button` — рамка 1 px, скругление xs, не уже 32 px.
+component KeyCap inherits Rectangle {
+    in property <string> text;
+    height: 24px;
+    width: max(32px, label.preferred-width + 12px);
+    border-radius: Theme.radius-size-xs;
+    border-width: 1px;
+    border-color: Theme.controls-color-primary-text-enabled;
+    background: Theme.controls-color-secondary-default-hovered;
+    label := Text {
+        text: root.text;
+        font-size: 14px;
+        color: Theme.controls-color-primary-text-enabled-variant;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Строка: действие слева, клавиши справа; две клавиши — через «или».
+component ShortcutRow inherits Rectangle {
+    in property <string> text;
+    in property <string> key1;
+    in property <string> key2;
+    height: 24px;
+    Text {
+        x: 0;
+        width: parent.width - keys.preferred-width - 16px;
+        height: parent.height;
+        text: root.text;
+        font-size: 14px;
+        vertical-alignment: center;
+        overflow: elide;
+        color: Theme.controls-color-primary-text-enabled-variant;
+    }
+    keys := HorizontalLayout {
+        x: parent.width - self.preferred-width;
+        width: self.preferred-width;
+        height: parent.height;
+        spacing: Theme.spacer-size-xs;
+        KeyCap { text: root.key1; }
+        if root.key2 != "": Text {
+            text: T.t("или");
+            font-size: 14px;
+            vertical-alignment: center;
+            color: Theme.controls-color-primary-text-enabled-variant;
+        }
+        if root.key2 != "": KeyCap { text: root.key2; }
+    }
+}
+
+// Окно «Горячие клавиши» (ShortcutsModal оригинала): до 430×570, заголовок с отступами
+// 20 сверху и 32 снизу, поля 16, между строками 12. Порядок строк и клавиши — как у оригинала.
+export component ShortcutsModal inherits Rectangle {
+    width: 430px;
+    height: min(570px, list.y + list.preferred-height + Theme.spacer-size-xxl);
+    border-radius: 16px;
+    background: Theme.background-color-primary-enabled-popover;
+    border-width: 1px;
+    border-color: Theme.outline-color-primary-disabled;
+    drop-shadow-blur: 20px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: Theme.dark ? #0000007a : #0000003d;
+    clip: true;
+    TouchArea { }
+
+    Text {
+        x: Theme.spacer-size-l;
+        y: Theme.spacer-size-xl;
+        height: 32px;
+        text: T.t("Горячие клавиши");
+        vertical-alignment: center;
+        font-family: "YS Music Headline";
+        font-size: Theme.font-size-headline-xs;
+        font-weight: 700;
+        color: Theme.controls-color-primary-text-enabled-variant;
+    }
+    Rectangle {
+        x: parent.width - Theme.spacer-size-l - 32px;
+        y: Theme.spacer-size-xl;
+        width: 32px;
+        height: 32px;
+        border-radius: 16px;
+        background: close-ta.has-hover ? Theme.controls-color-secondary-default-hovered : Theme.controls-color-secondary-default-enabled;
+        animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+        Icon { source: Icons.close-small; size: 20px; colorize: Theme.controls-color-primary-text-enabled-variant; }
+        close-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { App.shortcuts-open = false; }
+        }
+    }
+
+    list := VerticalLayout {
+        x: Theme.spacer-size-l;
+        y: Theme.spacer-size-xl + 32px + Theme.spacer-size-xxxl;
+        width: parent.width - 2 * Theme.spacer-size-l;
+        spacing: Theme.spacer-size-m;
+        ShortcutRow { text: T.t("Включить музыку/поставить на паузу"); key1: "K"; }
+        ShortcutRow { text: T.t("Отключить/включить звук"); key1: "M"; }
+        ShortcutRow { text: T.t("Промотать вперед"); key1: "→"; key2: "L"; }
+        ShortcutRow { text: T.t("Промотать назад"); key1: "←"; key2: "J"; }
+        ShortcutRow { text: T.t("Увеличить громкость"); key1: "↑"; }
+        ShortcutRow { text: T.t("Уменьшить громкость"); key1: "↓"; }
+        ShortcutRow { text: T.t("Лайк"); key1: "F"; }
+        ShortcutRow { text: T.t("Дизлайк"); key1: "D"; }
+        ShortcutRow { text: T.t("Переключение режима повтора"); key1: "R"; }
+        ShortcutRow { text: T.t("Переключение режима («в случайном порядке»)"); key1: "S"; }
+        ShortcutRow { text: T.t("Переключить на следующий трек"); key1: "N"; }
+        ShortcutRow { text: T.t("Переключить на предыдущий трек"); key1: "P"; }
+        ShortcutRow { text: T.t("Открыть / закрыть фулскрин плеер"); key1: "W"; }
+    }
+}

@@ -3,10 +3,11 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
 use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, SetProcessWorkingSetSize};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
 use windows_sys::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
@@ -52,8 +53,89 @@ pub fn is_shown(w: &slint::Window) -> bool {
     hwnd != 0 && is_visible(hwnd)
 }
 
+pub fn minimize(w: &slint::Window) {
+    w.set_minimized(true);
+}
+
 pub fn is_minimized(w: &slint::Window) -> bool {
     is_iconic(handle(w))
+}
+
+/// Настоящее состояние окна, включая Windows Snap и Win+стрелки.
+pub fn is_maximized(w: &slint::Window) -> bool {
+    unsafe { IsZoomed(h(handle(w))) != 0 }
+}
+
+/// Мини-плееру не нужны Snap, разворачивание и системные края изменения размера.
+/// Меняем и флаги winit, и уже созданное окно, чтобы следующая смена свойств их не вернула.
+pub fn set_mini_mode(w: &slint::Window, mini: bool) {
+    use slint::winit_030::{winit::window::WindowButtons, WinitWindowAccessor};
+    w.with_winit_window(|ww| {
+        if mini {
+            ww.set_maximized(false);
+        }
+        ww.set_resizable(!mini);
+        ww.set_enabled_buttons(if mini { WindowButtons::CLOSE | WindowButtons::MINIMIZE } else { WindowButtons::all() });
+    });
+    let hwnd = handle(w);
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let style = GetWindowLongPtrW(h(hwnd), GWL_STYLE) as u32;
+        let snap = WS_THICKFRAME | WS_MAXIMIZEBOX;
+        let wanted = if mini { style & !snap } else { style | snap };
+        if wanted != style {
+            SetWindowLongPtrW(h(hwnd), GWL_STYLE, wanted as isize);
+            SetWindowPos(h(hwnd), null_mut(), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// Системное перетаскивание без внутреннего флага winit, который застревает после Snap.
+/// Развёрнутое окно восстанавливаем под курсором перед началом движения.
+pub fn start_move(w: &slint::Window) {
+    let hwnd = handle(w);
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut pt);
+        if IsZoomed(h(hwnd)) != 0 {
+            let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
+            wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            let mut rect: RECT = std::mem::zeroed();
+            if GetWindowPlacement(h(hwnd), &mut wp) != 0 && GetWindowRect(h(hwnd), &mut rect) != 0 {
+                let normal = wp.rcNormalPosition;
+                let (width, height) = (normal.right - normal.left, normal.bottom - normal.top);
+                if width > 0 && height > 0 {
+                    let ratio = ((pt.x - rect.left) as f64 / (rect.right - rect.left).max(1) as f64).clamp(0.0, 1.0);
+                    let x = pt.x - (ratio * width as f64) as i32;
+                    let y = pt.y - 16;
+                    ShowWindow(h(hwnd), SW_RESTORE);
+                    SetWindowPos(h(hwnd), null_mut(), x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            }
+        }
+        ReleaseCapture();
+        let lp = (((pt.y as u32) & 0xFFFF) << 16) | ((pt.x as u32) & 0xFFFF);
+        PostMessageW(h(hwnd), WM_NCLBUTTONDOWN, HTCAPTION as usize, lp as isize);
+    }
+}
+
+/// Направления 0..7 соответствуют краям и углам в интерфейсе.
+pub fn start_resize(w: &slint::Window, dir: i32) {
+    let hwnd = handle(w);
+    if hwnd == 0 {
+        return;
+    }
+    let code = [HTTOP, HTTOPRIGHT, HTRIGHT, HTBOTTOMRIGHT, HTBOTTOM, HTBOTTOMLEFT, HTLEFT, HTTOPLEFT]
+        [dir.clamp(0, 7) as usize];
+    unsafe {
+        ReleaseCapture();
+        PostMessageW(h(hwnd), WM_NCLBUTTONDOWN, code as usize, 0);
+    }
 }
 
 /// Масштаб монитора, на котором окно.

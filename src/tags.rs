@@ -1,4 +1,4 @@
-//! Теги ID3v2.3 для скачанных mp3: название, исполнители, альбом, год, номер и обложка.
+//! Теги скачанных треков: ID3v2.3 в mp3, Vorbis comment и картинка во FLAC.
 
 pub struct Tags<'a> {
     pub title: &'a str,
@@ -51,7 +51,7 @@ pub fn id3(t: &Tags) -> Vec<u8> {
         frames.extend(text_frame(b"TRCK", &n.to_string()));
     }
     if let Some(img) = t.cover {
-        let mime: &[u8] = if img.starts_with(&[0x89, b'P', b'N', b'G']) { b"image/png" } else { b"image/jpeg" };
+        let mime = mime(img);
         let mut body = vec![0u8];
         body.extend_from_slice(mime);
         body.push(0);
@@ -65,6 +65,49 @@ pub fn id3(t: &Tags) -> Vec<u8> {
     out.extend_from_slice(&synchsafe(frames.len() as u32));
     out.extend(frames);
     out
+}
+
+fn mime(img: &[u8]) -> &'static [u8] {
+    if img.starts_with(&[0x89, b'P', b'N', b'G']) {
+        b"image/png"
+    } else {
+        b"image/jpeg"
+    }
+}
+
+/// Блоки метаданных FLAC: теги (тип 4) и обложка (тип 6).
+pub fn flac_blocks(t: &Tags) -> Vec<crate::flac::Block> {
+    fn put(out: &mut Vec<u8>, s: &[u8]) {
+        out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        out.extend_from_slice(s);
+    }
+    let year = t.year.map(|y| y.to_string()).unwrap_or_default();
+    let track = t.track.map(|n| n.to_string()).unwrap_or_default();
+    let fields: Vec<String> = [("TITLE", t.title), ("ARTIST", t.artist), ("ALBUM", t.album), ("DATE", &year), ("TRACKNUMBER", &track)]
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    let mut vc = Vec::new();
+    put(&mut vc, concat!("yamusic-rs ", env!("CARGO_PKG_VERSION")).as_bytes());
+    vc.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+    for f in &fields {
+        put(&mut vc, f.as_bytes());
+    }
+    let mut blocks = vec![(4, vc)];
+    if let Some(img) = t.cover {
+        let mime = mime(img);
+        let mut p = Vec::with_capacity(img.len() + 48);
+        p.extend_from_slice(&3u32.to_be_bytes()); // обложка спереди
+        p.extend_from_slice(&(mime.len() as u32).to_be_bytes());
+        p.extend_from_slice(mime);
+        p.extend_from_slice(&0u32.to_be_bytes()); // пустое описание
+        p.extend_from_slice(&[0; 16]); // размеры и глубина цвета необязательны
+        p.extend_from_slice(&(img.len() as u32).to_be_bytes());
+        p.extend_from_slice(img);
+        blocks.push((6, p));
+    }
+    blocks
 }
 
 /// Сколько байт в начале файла занимает уже имеющийся тег ID3v2 (0 — тега нет).
@@ -87,5 +130,18 @@ mod tests {
         assert_eq!(&tag[..3], b"ID3");
         assert_eq!(existing_id3_len(&tag), tag.len());
         assert_eq!(existing_id3_len(b"fLaC0000000000"), 0);
+    }
+
+    #[test]
+    fn vorbis_comment() {
+        let blocks = flac_blocks(&Tags { title: "Песня", artist: "Исполнитель", album: "", year: Some(2010), track: None, cover: None });
+        assert_eq!(blocks.len(), 1);
+        let (kind, b) = &blocks[0];
+        assert_eq!(*kind, 4);
+        let vendor = u32::from_le_bytes(b[..4].try_into().unwrap()) as usize;
+        let rest = &b[4 + vendor..];
+        assert_eq!(u32::from_le_bytes(rest[..4].try_into().unwrap()), 3);
+        let first = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
+        assert_eq!(&rest[8..8 + first], "TITLE=Песня".as_bytes());
     }
 }
