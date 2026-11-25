@@ -631,11 +631,12 @@ fn menu_action(n: i32) {
         8 => {
             let uid = now::uid();
             std::thread::spawn(move || {
-                if let Err(e) = api.dislike(&uid, &t.full_id()) {
+                if let Err(e) = api.dislike(&uid, &t.full_id(), false) {
                     log(format!("дизлайк: {e}"));
                 }
             });
         }
+        9 => crate::download::start(api, "", vec![t]),
         _ => {}
     }
 }
@@ -733,6 +734,7 @@ fn action(b: usize, n: i32) {
                 std::thread::spawn(move || match api.trailer(&format!("artists/{id}")) {
                     Ok((title, tracks)) => {
                         p.send_for_request(request, Cmd::PlayList { source: Source::List { kind: ListKind::Artist, id, title }, tracks, start: 0, after: After::Wave(Source::Wave) });
+
                     }
                     Err(e) => log(format!("трейлер: {e}")),
                 });
@@ -1008,7 +1010,9 @@ fn landing_block(kind: &str, title: &str, more: bool, uri: &str, b: LBlock) -> B
         }
         "CHART_TRACKS" => {
             let pos = b.chart.iter().map(|(p, _)| p.to_string()).collect();
-            return Block { pos, more: more_key, ..Block::tracks(title, b.tracks.into_iter().take(5).collect()) };
+            // Блок лендинга отдаёт только топ-10, весь чарт — /landing3/chart, как на ПК.
+            let more = Some(Key::Block(kind.to_string(), "/landing3/chart".into(), title.to_string()));
+            return Block { pos, more, ..Block::tracks(title, b.tracks.into_iter().take(5).collect()) };
         }
         "DONATIONS" | "EDITORIAL_ARTISTS" => Block::cards(ARTISTS, title, b.cards),
         "EDITORIAL_PROMOTIONS" => Block::cards(BANNERS, title, b.cards),

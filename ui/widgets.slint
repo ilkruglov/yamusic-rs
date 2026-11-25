@@ -27,6 +27,7 @@ export global Icons {
     in property <image> like;
     in property <image> liked;
     in property <image> dislike;
+    in property <image> disliked;
     in property <image> shuffle;
     in property <image> repeat;
     in property <image> repeat-one;
@@ -105,6 +106,7 @@ export global Icons {
     in property <image> m-play-next;
     in property <image> m-play-last;
     in property <image> m-dislike;
+    in property <image> m-disliked;
     in property <image> m-add-playlist;
     in property <image> m-lyrics;
     in property <image> m-share;
@@ -192,6 +194,8 @@ export component BarButton inherits Rectangle {
     in property <bool> grow-on-hover;
     in property <bool> smooth-color: grow-on-hover;
     in property <brush> ink-off: #ffffff14;
+    /// Колёсико над кнопкой меняет громкость.
+    in property <bool> scroll-volume;
     out property <bool> hovered: ta.has-hover;
     callback clicked;
     width: 32px;
@@ -208,6 +212,13 @@ export component BarButton inherits Rectangle {
         enabled: root.enabled;
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
+        scroll-event(e) => {
+            if !root.scroll-volume {
+                return reject;
+            }
+            App.set-volume(max(0, min(1, App.volume + (e.delta-y > 0 ? 0.02 : -0.02))));
+            accept
+        }
     }
 }
 

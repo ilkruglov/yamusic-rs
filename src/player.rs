@@ -7,7 +7,7 @@ use crate::config::log;
 use crate::eq::{Eq, EqParams};
 use crate::fade::{Fade, FadeOut};
 use crate::stream::{Buf, Reader};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source as _};
+use rodio::{Decoder, Sink, Source as _};
 use std::collections::{HashSet, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -80,6 +80,8 @@ pub struct Shared {
     pub playing: bool,
     pub(crate) paused: bool,
     pub likes_revision: i32,
+    /// Текущий трек в «Не нравится».
+    pub disliked: bool,
     pub loading: bool,
     pub position: f32,
     track_generation: u64,
@@ -139,7 +141,7 @@ pub enum Cmd {
     Volume(f32),
     Loudness(Loudness),
     LikeTrack(Track, Option<LikeCompleted>),
-    Dislike,
+    Dislike(Option<Box<dyn FnOnce() + Send>>),
     Wave(Source),
     /// Заново начать «Мою волну» с настройками (seeds `setting…`).
     TuneWave(Vec<String>),
@@ -163,12 +165,12 @@ enum Msg {
     Seek { seconds: f32, track_generation: u64, request: u64 },
     Account(u64, Res<Account>),
     Likes(u64, Res<Vec<String>>),
-    LikeSaved { id: String, seq: u64, liked: bool, result: Res<()> },
+    ReactionSaved { id: String, seq: u64, reaction: Reaction, result: Res<()> },
+    Dislikes(u64, Res<Vec<String>>),
     Batch { res: Res<Batch>, replace: bool, gen: u64 },
     Audio { gen: u64, res: Res<Audio> },
     Prefetch { generation: u64, id: String, res: Res<Audio> },
     Resume(u64, Res<Option<Resume>>),
-    Error(String),
 }
 
 #[derive(Clone)]
@@ -330,8 +332,7 @@ impl Player {
 
 enum Output {
     System {
-        _stream: OutputStream,
-        handle: OutputStreamHandle,
+        stream: crate::output::Output,
         #[cfg(windows)]
         device: rodio::cpal::platform::WasapiDevice,
         #[cfg(windows)]
@@ -346,10 +347,18 @@ enum Output {
 }
 
 impl Output {
+    fn sample_rate(&self) -> u32 {
+        match self {
+            Self::System { stream, .. } => stream.sample_rate(),
+            #[cfg(all(windows, feature = "asio"))]
+            Self::Asio(stream) => stream.sample_rate(),
+        }
+    }
+
     fn track_sink(&self, track: impl rodio::Source<Item = f32> + Send + 'static, volume: f32) -> Result<Sink, String> {
         match self {
-            Self::System { handle, .. } => {
-                let sink = Sink::try_new(handle).map_err(|e| e.to_string())?;
+            Self::System { stream, .. } => {
+                let sink = stream.sink();
                 sink.pause();
                 sink.set_volume(volume);
                 sink.append(track);
@@ -421,9 +430,14 @@ fn open_output(asio_driver: Option<&str>) -> Result<Output, String> {
     }
     #[cfg(not(windows))]
     {
-        let (stream, handle) = OutputStream::try_default()
+        use rodio::cpal::traits::HostTrait;
+        let host = rodio::cpal::default_host();
+        let open = crate::output::Output::open;
+        let stream = host.default_output_device().ok_or(rodio::StreamError::NoDevice)
+            .and_then(|dev| open(&dev))
+            .or_else(|err| host.output_devices().ok().and_then(|mut devices| devices.find_map(|dev| open(&dev).ok())).ok_or(err))
             .map_err(|e| format!("Не удалось открыть системный аудиовыход: {e}"))?;
-        Ok(Output::System { _stream: stream, handle })
+        Ok(Output::System { stream })
     }
 }
 
@@ -472,9 +486,9 @@ fn open_system_device(
     observed_default: Option<rodio::cpal::platform::WasapiDevice>,
 ) -> Result<Output, String> {
     let dev = rodio::Device::from(device.clone());
-    let (stream, handle) = open_surround(&dev).map(Ok).unwrap_or_else(|| OutputStream::try_from_device(&dev))
+    let stream = open_surround(&dev).map(Ok).unwrap_or_else(|| crate::output::Output::open(&dev))
         .map_err(|e| format!("Не удалось открыть системный аудиовыход: {e}"))?;
-    Ok(Output::System { _stream: stream, handle, device, observed_default, last_progress: None, retry_default: Instant::now() + Duration::from_secs(10) })
+    Ok(Output::System { stream, device, observed_default, last_progress: None, retry_default: Instant::now() + Duration::from_secs(10) })
 }
 
 /// Сколько живёт сессия волны без прослушивания: оригинал начинает новую через 9 часов.
@@ -576,7 +590,7 @@ type Audio = (Arc<Buf>, Decoder<Reader>, String);
 
 /// Многоканальные выходы Windows (виртуальные 7.1 у гарнитур) искажают f32, а i32 играют чисто: cpal#892.
 #[cfg(windows)]
-fn open_surround(dev: &rodio::Device) -> Option<(OutputStream, rodio::OutputStreamHandle)> {
+fn open_surround(dev: &rodio::Device) -> Option<crate::output::Output> {
     use rodio::cpal::SampleFormat;
     use rodio::DeviceTrait;
     let def = dev.default_output_config().ok()?;
@@ -589,7 +603,7 @@ fn open_surround(dev: &rodio::Device) -> Option<(OutputStream, rodio::OutputStre
         .ok()?
         .find(|c| c.sample_format() == SampleFormat::I32 && c.channels() == def.channels() && c.min_sample_rate() <= rate && rate <= c.max_sample_rate())?
         .with_sample_rate(rate);
-    let out = OutputStream::try_from_device_config(dev, cfg).ok()?;
+    let out = crate::output::Output::open_with(dev, cfg).ok()?;
     log(format!("аудиовыход: {} каналов, i32", def.channels()));
     Some(out)
 }
@@ -600,6 +614,9 @@ const YNISON_EVERY: Duration = Duration::from_secs(60);
 /// Сколько позиция может стоять на месте у играющего скачанного трека.
 #[cfg(not(windows))]
 const STALL_LIMIT: Duration = Duration::from_secs(3);
+
+/// Если выход снова сломался быстрее этого, не переоткрываем его, а ставим паузу до Play.
+const BROKEN_AGAIN: Duration = Duration::from_secs(30);
 
 fn load_track(api: &Api, t: &Track) -> Res<Audio> {
     let (url, format) = api.stream_url(&t.id)?;
@@ -709,21 +726,25 @@ struct ListPlay {
     after: After,
 }
 
-struct PendingLike {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reaction { Neutral, Like, Dislike }
+
+struct PendingReaction {
     first: u64,
     latest: u64,
-    confirmed: bool,
+    confirmed: Reaction,
 }
 
 struct Engine {
     tx: AudioSender,
     bg: Sender<Job>,
-    like_seq: u64,
-    local_likes: HashSet<String>,
-    pending_likes: std::collections::HashMap<String, PendingLike>,
+    reaction_seq: u64,
+    local_reactions: HashSet<String>,
+    pending_reactions: std::collections::HashMap<String, PendingReaction>,
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
-    // Запоминаем и снятые лайки, иначе старый список с сервера может их вернуть.
+    dislikes: HashSet<String>,
+    broke_at: Option<Instant>,
 
     notify: Notify,
     eq: Arc<EqParams>,
@@ -812,12 +833,13 @@ impl Engine {
         Engine {
             tx: tx.into(),
             bg,
-            like_seq: 0,
-            local_likes: HashSet::new(),
-            pending_likes: Default::default(),
+            reaction_seq: 0,
+            local_reactions: HashSet::new(),
+            pending_reactions: Default::default(),
             shared,
             likes,
-
+            dislikes: HashSet::new(),
+            broke_at: None,
             notify,
             eq,
             asio_driver,
@@ -932,7 +954,9 @@ impl Engine {
     /// Источник для звука: эквалайзер, декодирование наперёд и затухание для кроссфейда.
     fn source(&mut self, src: Decoder<Reader>, fade_in: Duration) -> impl rodio::Source<Item = f32> + Send + 'static {
         self.fade_out = Arc::default();
-        Fade::new(Ahead::new(Eq::new(src.convert_samples::<f32>(), self.eq.clone())), fade_in, self.fade_out.clone())
+        let rate = self.audio.as_ref().map_or_else(|| src.sample_rate(), Output::sample_rate);
+        let eq = Eq::new(src.convert_samples::<f32>(), self.eq.clone());
+        Fade::new(Ahead::new(eq, rate), fade_in, self.fade_out.clone())
     }
 
     /// Пора ли начать кроссфейд: до конца трека осталось его время и следующий трек уже скачан.
@@ -1004,7 +1028,6 @@ impl Engine {
         self.sh().audio_output_error = Some((message, Instant::now()));
     }
 
-    #[cfg(windows)]
     fn detach_output(&mut self) {
         self.fading = None;
         if let Some(sink) = self.sink.take() {
@@ -1046,7 +1069,7 @@ impl Engine {
                     && self.open_at_position(open_output(old.as_deref())).is_ok();
                 if !restored_old && (self.loaded || !self.paused || old.is_none()) {
                     self.audio = None;
-                    match self.open_at_position(open_system_output(if manual { previous_system } else { None })) {
+                    match self.open_at_position(open_system_output(if manual { previous_system.clone() } else { None })) {
                         Ok(()) => {
                             if manual { self.asio_driver = None; }
                             message.push_str(". Используется системный выход");
@@ -1060,6 +1083,9 @@ impl Engine {
                 }
                 self.output_error(message);
             }
+        }
+        if manual || !matches!(&self.audio, Some(Output::System { device, .. }) if Some(device) == previous_system.as_ref()) {
+            self.broke_at = None;
         }
     }
 
@@ -1303,8 +1329,11 @@ impl Engine {
 
     fn reset(&mut self) {
         self.account_generation += 1;
-        self.pending_likes.clear();
-        self.local_likes.clear();
+        self.dislikes.clear();
+        self.sh().disliked = false;
+        self.broke_at = None;
+        self.pending_reactions.clear();
+        self.local_reactions.clear();
         self.resume_at = None;
         self.ynison_due = None;
         self.tune = None;
@@ -1370,6 +1399,25 @@ impl Engine {
     // ---------- главный цикл ----------
 
     fn tick(&mut self) {
+        if matches!(&self.audio, Some(Output::System { stream, .. }) if stream.broken()) {
+            let again = self.broke_at.is_some_and(|at| at.elapsed() < BROKEN_AGAIN);
+            self.broke_at = Some(Instant::now());
+            if again {
+                self.detach_output();
+                self.pause();
+                self.output_error("Звуковой выход снова недоступен".into());
+            } else {
+                #[cfg(windows)]
+                self.change_output(self.asio_driver.clone(), false);
+                #[cfg(not(windows))]
+                {
+                    self.detach_output();
+                    if !self.paused && self.loaded { self.resume(); }
+                }
+            }
+            self.sync();
+            (self.notify)();
+        }
         #[cfg(windows)]
         if Instant::now() >= self.next_output_check {
             self.next_output_check = Instant::now() + Duration::from_millis(750);
@@ -1446,7 +1494,7 @@ impl Engine {
                 }
                 self.handled_seek = request;
             }
-            Msg::Account(gen, _) | Msg::Likes(gen, _) if gen != self.account_generation => {}
+            Msg::Account(gen, _) | Msg::Likes(gen, _) | Msg::Dislikes(gen, _) if gen != self.account_generation => {}
             Msg::Account(gen, res) => match res {
                 Ok(acc) => {
                     self.uid = acc.uid.clone();
@@ -1469,6 +1517,7 @@ impl Engine {
                         let uid = acc.uid;
                         thread::spawn(move || {
                             let _ = tx.send(Msg::Likes(gen, api.liked_ids(&uid)));
+                            let _ = tx.send(Msg::Dislikes(gen, api.disliked_ids(&uid)));
                         });
                     }
                 }
@@ -1490,6 +1539,21 @@ impl Engine {
             Msg::Likes(_, res) => match res {
                 Ok(ids) => self.merge_likes(ids),
                 Err(e) => log(format!("likes: {e}")),
+            },
+            Msg::Dislikes(_, res) => match res {
+                Ok(ids) => {
+                    for id in ids {
+                        if self.local_reactions.contains(&id) { continue; }
+                        if let Some(pending) = self.pending_reactions.get_mut(&id) {
+                            pending.confirmed = Reaction::Dislike;
+                        } else {
+                            self.dislikes.insert(id);
+                        }
+                    }
+                    let disliked = self.current.as_ref().is_some_and(|t| self.dislikes.contains(&t.id));
+                    self.sh().disliked = disliked;
+                }
+                Err(e) => log(format!("dislikes: {e}")),
             },
             Msg::Batch { res, replace, gen } => {
                 if gen != self.batch_gen {
@@ -1532,29 +1596,28 @@ impl Engine {
                     }
                 }
             }
-            Msg::LikeSaved { id, seq, liked, result } => {
-                let Some(pending) = self.pending_likes.get_mut(&id) else { return };
+            Msg::ReactionSaved { id, seq, reaction, result } => {
+                let Some(pending) = self.pending_reactions.get_mut(&id) else { return };
                 if seq < pending.first { return; }
                 if result.is_ok() {
-                    pending.confirmed = liked;
-                    self.local_likes.insert(id.clone());
+                    pending.confirmed = reaction;
+                    self.local_reactions.insert(id.clone());
                 }
                 if seq == pending.latest {
                     let confirmed = pending.confirmed;
-                    self.pending_likes.remove(&id);
-                    {
-                        let mut likes = self.likes.lock().unwrap();
-                        if confirmed { likes.insert(id.clone()); } else { likes.remove(&id); }
-                    }
-                    self.likes_changed();
+                    self.pending_reactions.remove(&id);
+                    self.set_reaction(&id, confirmed);
                 }
                 if let Err(e) = result {
-                    let message = format!("Лайк не сохранился: {e}");
-                    log(&message);
-                    self.sh().like_error = Some(message);
+                    #[cfg(target_os = "android")]
+                    self.error(e);
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        log(&e);
+                        self.sh().like_error = Some(e);
+                    }
                 }
             }
-            Msg::Error(e) => self.error(e),
         }
     }
 
@@ -1638,18 +1701,20 @@ impl Engine {
                 self.apply_volume();
             }
             Cmd::LikeTrack(t, saved) => self.toggle_like(t, saved),
-            Cmd::Dislike => {
-                if let (Some(api), Some(t)) = (self.api.clone(), self.current.as_ref()) {
-                    let id = t.full_id();
-                    let uid = self.uid.clone();
-                    let tx = self.tx.clone();
-                    let _ = self.bg.send(Box::new(move || {
-                        if let Err(e) = api.dislike(&uid, &id) {
-                            let _ = tx.send(Msg::Error(format!("Дизлайк не сохранился: {e}")));
-                        }
-                    }));
-                }
-                self.advance(End::Dislike);
+            Cmd::Dislike(saved) => {
+                let (Some(t), Some(api)) = (self.current.clone(), self.api.clone()) else { return };
+                let remove = self.dislikes.contains(&t.id);
+                let reaction = if remove { Reaction::Neutral } else { Reaction::Dislike };
+                let seq = self.begin_reaction(&t.id, reaction);
+                let (uid, tx) = (self.uid.clone(), self.tx.clone());
+                let _ = self.bg.send(Box::new(move || {
+                    let result = api.dislike(&uid, &t.full_id(), remove).map_err(|e| format!("Дизлайк не сохранился: {e}"));
+                    if result.is_ok() && !remove {
+                        if let Some(saved) = saved { saved(); }
+                    }
+                    let _ = tx.send(Msg::ReactionSaved { id: t.id, seq, reaction, result });
+                }));
+                if !remove { self.advance(End::Dislike); }
             }
             Cmd::Wave(src) => self.start_wave(src, true),
             Cmd::TuneWave(settings) => {
@@ -1662,30 +1727,8 @@ impl Engine {
                 self.tune = Some(settings);
                 self.fetch_batch_with(true);
             }
-            Cmd::PlayList { source, mut tracks, start, after } => {
-                for (index, track) in tracks.iter_mut().enumerate() { track.list_position = Some(index); }
-                if tracks.is_empty() {
-                    return;
-                }
-                // Играть нечего: текущий трек не трогаем, а говорим, почему ничего не включилось.
-                if !crate::api::allow_explicit() && tracks.iter().all(|t| t.explicit) {
-                    self.error("Здесь только треки 18+. Их можно включить в меню профиля");
-                    return;
-                }
-                self.end_current(Some("skip"), true, "other_track");
-                self.clear_queue();
-                let start = start.min(tracks.len() - 1);
-                let mut order: Vec<Track> = tracks.clone();
-                order.rotate_left(start);
-                let first = order.remove(0);
-                if self.shuffle {
-                    shuffle(&mut order);
-                }
-                self.queue.push_back(first);
-                self.queue.extend(order);
-                self.list = Some(ListPlay { deferred: VecDeque::new(), all: tracks, after });
-                self.set_source(source);
-                self.advance(End::Skip);
+            Cmd::PlayList { source, tracks, start, after } => {
+                self.play_list(source, tracks, start, after, cfg!(target_os = "android"));
             }
             Cmd::Jump(i) => {
                 if i >= self.queue.len() {
@@ -1755,9 +1798,9 @@ impl Engine {
         let mut likes = self.likes.lock().unwrap();
         let before = likes.len();
         for id in ids {
-            if self.local_likes.contains(&id) { continue; }
-            if let Some(pending) = self.pending_likes.get_mut(&id) {
-                pending.confirmed = true;
+            if self.local_reactions.contains(&id) { continue; }
+            if let Some(pending) = self.pending_reactions.get_mut(&id) {
+                pending.confirmed = Reaction::Like;
             } else {
                 likes.insert(id);
             }
@@ -1767,28 +1810,40 @@ impl Engine {
         if changed { self.likes_changed(); }
     }
 
+    fn set_reaction(&mut self, id: &str, reaction: Reaction) {
+        let mut likes = self.likes.lock().unwrap();
+        let changed = if reaction == Reaction::Like { likes.insert(id.to_string()) } else { likes.remove(id) };
+        drop(likes);
+        if changed { self.likes_changed(); }
+        let disliked = reaction == Reaction::Dislike;
+        if disliked { self.dislikes.insert(id.to_string()); } else { self.dislikes.remove(id); }
+        if self.current.as_ref().is_some_and(|t| t.id == id) { self.sh().disliked = disliked; }
+    }
+
+    fn begin_reaction(&mut self, id: &str, reaction: Reaction) -> u64 {
+        let confirmed = if self.likes.lock().unwrap().contains(id) { Reaction::Like }
+            else if self.dislikes.contains(id) { Reaction::Dislike } else { Reaction::Neutral };
+        self.reaction_seq += 1;
+        let seq = self.reaction_seq;
+        self.pending_reactions.entry(id.to_string()).or_insert(PendingReaction {
+            first: seq, latest: seq, confirmed,
+        }).latest = seq;
+        self.set_reaction(id, reaction);
+        seq
+    }
+
     fn toggle_like(&mut self, t: Track, done: Option<LikeCompleted>) {
         let Some(api) = self.api.clone() else { return };
-        let remove = {
-            let mut l = self.likes.lock().unwrap();
-            let had = l.remove(&t.id);
-            if !had {
-                l.insert(t.id.clone());
-            }
-            had
-        };
-        self.likes_changed();
-        self.like_seq += 1;
-        let seq = self.like_seq;
-        self.pending_likes.entry(t.id.clone()).or_insert(PendingLike {
-            first: seq, latest: seq, confirmed: remove,
-        }).latest = seq;
+        let remove = self.likes.lock().unwrap().contains(&t.id);
+        let reaction = if remove { Reaction::Neutral } else { Reaction::Like };
+        let seq = self.begin_reaction(&t.id, reaction);
         let track = t.clone();
         let (uid, id, full_id, tx) = (self.uid.clone(), t.id.clone(), t.full_id(), self.tx.clone());
         let _ = self.bg.send(Box::new(move || {
             let result = api.like(&uid, &full_id, remove);
             if let Some(done) = done { done(&track, !remove, &result); }
-            let _ = tx.send(Msg::LikeSaved { id, seq, liked: !remove, result });
+            let result = result.map_err(|e| format!("Лайк не сохранился: {e}"));
+            let _ = tx.send(Msg::ReactionSaved { id, seq, reaction, result });
         }));
         // Лайк трека из волны оригинал сообщает и самой волне, чтобы она его учла.
         if self.session.is_empty() {
@@ -1807,6 +1862,33 @@ impl Engine {
     }
 
     // ---------- очередь ----------
+
+    fn play_list(&mut self, source: Source, mut tracks: Vec<Track>, start: usize, after: After, start_playing: bool) {
+        for (index, track) in tracks.iter_mut().enumerate() { track.list_position = Some(index); }
+        if tracks.is_empty() {
+            return;
+        }
+        // Играть нечего: текущий трек не трогаем, а говорим, почему ничего не включилось.
+        if !crate::api::allow_explicit() && tracks.iter().all(|t| t.explicit) {
+            self.error("Здесь только треки 18+. Их можно включить в меню профиля");
+            return;
+        }
+        if start_playing { self.paused = false; }
+        self.end_current(Some("skip"), true, "other_track");
+        self.clear_queue();
+        let start = start.min(tracks.len() - 1);
+        let mut order: Vec<Track> = tracks.clone();
+        order.rotate_left(start);
+        let first = order.remove(0);
+        if self.shuffle {
+            shuffle(&mut order);
+        }
+        self.queue.push_back(first);
+        self.queue.extend(order);
+        self.list = Some(ListPlay { deferred: VecDeque::new(), all: tracks, after });
+        self.set_source(source);
+        self.advance(End::Skip);
+    }
 
     fn start_wave(&mut self, src: Source, fetch: bool) {
         // Пропуск уходит ещё в старую волну: clear_queue отправит его туда.
@@ -2135,6 +2217,7 @@ impl Engine {
             s.playing = false;
             s.paused = self.paused;
             s.track_generation = self.gen;
+            s.disliked = self.dislikes.contains(&t.id);
             s.track = Some(t.clone());
             s.position = position;
             s.duration = t.duration_ms as f32 / 1000.0;
@@ -2219,6 +2302,8 @@ impl Engine {
 
     fn pause(&mut self) {
         self.paused = true;
+        #[cfg(target_os = "android")]
+        self.detach_output();
         if let Some(l) = &mut self.listen {
             l.stop();
             l.pause = true;
@@ -2325,7 +2410,7 @@ impl Engine {
             self.play_from_queue();
             self.fetch_batch();
         } else {
-            self.cmd(Cmd::PlayList { source: r.source, tracks: r.tracks, start: r.index, after: After::Loop });
+            self.play_list(r.source, r.tracks, r.index, After::Loop, false);
         }
         self.sh().resumed = true;
     }
@@ -2451,6 +2536,23 @@ mod tests {
     }
 
     #[test]
+    fn newer_dislike_keeps_older_like_reply_from_restoring_the_heart() {
+        let mut e = wave_engine();
+        let (bg, _jobs) = mpsc::channel();
+        e.bg = bg;
+        e.api = Some(Api::new(""));
+        let track = wave_batch(&["7"]).tracks.pop().unwrap();
+        e.current = Some(track.clone());
+        e.toggle_like(track, None);
+        e.cmd(Cmd::Dislike(None));
+        e.handle(Msg::ReactionSaved { id: "7".into(), seq: 1, reaction: Reaction::Like, result: Ok(()) });
+        assert!(!e.likes.lock().unwrap().contains("7"));
+        e.handle(Msg::ReactionSaved { id: "7".into(), seq: 2, reaction: Reaction::Dislike, result: Err("offline".into()) });
+        assert!(e.likes.lock().unwrap().contains("7"));
+        assert!(!e.dislikes.contains("7"));
+    }
+
+    #[test]
     fn queued_likes_keep_the_last_saved_state_on_error() {
         let mut e = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
         let (bg, _jobs) = mpsc::channel();
@@ -2458,7 +2560,7 @@ mod tests {
         e.api = Some(Api::new(""));
         e.uid = "account".into();
         let track = crate::api::parse_track(&serde_json::json!({"id": 7, "title": "Track"})).unwrap();
-        let reply = |seq, liked, result| Msg::LikeSaved { seq, id: "7".into(), liked, result };
+        let reply = |seq, liked, result| Msg::ReactionSaved { seq, id: "7".into(), reaction: if liked { Reaction::Like } else { Reaction::Neutral }, result };
         e.toggle_like(track.clone(), None);
         e.toggle_like(track.clone(), None);
         e.handle(reply(1, true, Ok(())));
@@ -2967,7 +3069,9 @@ fn explicit_filter_survives_repeat_and_previous() {
     let mut other = kept.clone();
     other.id = "3".into();
     engine.current = Some(kept.clone());
-    engine.cmd(Cmd::PlayList { source: Source::Wave, tracks: vec![other, kept], start: 1, after: After::Loop });
+    engine.paused = true;
+    engine.play_list(Source::Wave, vec![other, kept], 1, After::Loop, true);
+    assert!(engine.paused);
     let still = engine.current.as_ref().map(|t| t.id.clone());
     let told = engine.sh().error.is_some();
     crate::api::ALLOW_EXPLICIT.store(previous, std::sync::atomic::Ordering::Relaxed);
@@ -2996,15 +3100,15 @@ fn later_source_command_expires_artist_request() {
 #[test]
 fn last_failed_like_restores_previous_confirmation() {
     let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
-    engine.pending_likes.insert("1".into(), PendingLike { first: 2, latest: 3, confirmed: false });
-    engine.handle(Msg::LikeSaved { id: "1".into(), seq: 1, liked: false, result: Ok(()) });
-    engine.handle(Msg::LikeSaved { id: "1".into(), seq: 2, liked: true, result: Ok(()) });
+    engine.pending_reactions.insert("1".into(), PendingReaction { first: 2, latest: 3, confirmed: Reaction::Neutral });
+    engine.handle(Msg::ReactionSaved { id: "1".into(), seq: 1, reaction: Reaction::Neutral, result: Ok(()) });
+    engine.handle(Msg::ReactionSaved { id: "1".into(), seq: 2, reaction: Reaction::Like, result: Ok(()) });
     assert!(!engine.likes.lock().unwrap().contains("1"));
-    engine.handle(Msg::LikeSaved { id: "1".into(), seq: 3, liked: false, result: Err("offline".into()) });
+    engine.handle(Msg::ReactionSaved { id: "1".into(), seq: 3, reaction: Reaction::Neutral, result: Err("offline".into()) });
     assert!(engine.likes.lock().unwrap().contains("1"));
-    engine.pending_likes.insert("2".into(), PendingLike { first: 4, latest: 4, confirmed: false });
+    engine.pending_reactions.insert("2".into(), PendingReaction { first: 4, latest: 4, confirmed: Reaction::Neutral });
     engine.merge_likes(vec!["2".into()]);
-    engine.handle(Msg::LikeSaved { id: "2".into(), seq: 4, liked: true, result: Err("offline".into()) });
+    engine.handle(Msg::ReactionSaved { id: "2".into(), seq: 4, reaction: Reaction::Like, result: Err("offline".into()) });
     assert!(engine.likes.lock().unwrap().contains("2"));
 }
 

@@ -140,7 +140,8 @@ struct State {
     trailer: Option<Trailer>,
     /// Настройки «Моей волны» с сервера, выбранный вариант в каждой группе и картинки вариантов.
     wave_tune: Vec<(crate::api::WaveSettingGroup, usize, Vec<Image>)>,
-    downloading: bool,
+    /// Идущее скачивание списка: папка (она же название списка) и флаг отмены.
+    download: Option<(String, Arc<AtomicBool>)>,
 }
 
 /// Трейлер: треки звучат по 12,5 с с середины, потом следующий.
@@ -395,6 +396,7 @@ impl Ctx {
             return;
         };
         app.set_liked(self.player.is_liked(&t.id));
+        app.set_disliked(s.disliked);
         if changed {
             app.set_title(t.title.clone().into());
             app.set_artists(t.artists.clone().into());
@@ -1761,6 +1763,7 @@ fn set_icons(ui: &AppWindow, sprite: &Sprite) {
     icons.set_like(get("like_xs"));
     icons.set_liked(get("liked_xs"));
     icons.set_dislike(get("dislike_xs"));
+    icons.set_disliked(get("disliked_xs"));
     icons.set_shuffle(get("shuffle_xs"));
     icons.set_repeat(get("repeat_xs"));
     icons.set_repeat_one(get("repeat_one_xs"));
@@ -1828,6 +1831,7 @@ fn set_icons(ui: &AppWindow, sprite: &Sprite) {
     icons.set_m_play_next(get("playNext_xxs"));
     icons.set_m_play_last(get("playLast_xxs"));
     icons.set_m_dislike(get("dislike_xxs"));
+    icons.set_m_disliked(get("disliked_xxs"));
     icons.set_m_add_playlist(get("addToPlaylist_xxs"));
     icons.set_m_lyrics(get("lyrics_xxs"));
     icons.set_m_share(get("share_xxs"));
@@ -1980,6 +1984,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_translations(crate::i18n::available());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     app.set_download_flac(cfg.download_flac);
+    keys::init(&app, &cfg.hotkeys);
     app.set_log_volume(cfg.log_volume);
     app.set_wave_motion(cfg.wave_motion);
     app.set_crossfade(cfg.crossfade_secs > 0);
@@ -2064,7 +2069,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             vibe_key: None,
             trailer: None,
             wave_tune: Vec::new(),
-            downloading: false,
+            download: None,
         }),
     });
     CTX.with(|c| *c.borrow_mut() = Some(ctx.clone()));
@@ -2100,8 +2105,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             with_ctx(|c| c.like(t));
         }
     });
-    let p = player.clone();
-    app.on_dislike(move || p.send(Cmd::Dislike));
+    app.on_dislike(|| with_ctx(|c| c.dislike()));
     let p = player.clone();
     app.on_cycle_repeat(move || {
         let next = p.state().next_repeat();
@@ -2445,6 +2449,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             }
             WindowEvent::Moved(_) => {
                 after_move();
+                EventResult::Propagate
+            }
+            // В i3 кадры, нарисованные до того, как окно показано и растянуто, теряются, а Slint
+            // дорисовывает только изменившееся: окно оставалось пустым кусками (#87).
+            // Ждём, пока окно сменит размер или станет видно.
+            #[cfg(target_os = "linux")]
+            WindowEvent::Occluded(false) | WindowEvent::Focused(true) | WindowEvent::Resized(_) => {
+                Timer::single_shot(Duration::from_millis(150), || with_ctx(|c| full_repaint(&c.ui())));
                 EventResult::Propagate
             }
             _ => EventResult::Propagate,
@@ -3197,7 +3209,12 @@ impl Ctx {
             self.menu_entry("last", "Добавить в конец очереди", icons.get_m_play_last(), false),
         ];
         if current {
-            items.push(self.menu_entry("dislike", "Не нравится", icons.get_m_dislike(), false));
+            let entry = if self.player.state().disliked {
+                self.menu_entry("dislike", "Убрать из «Не нравится»", icons.get_m_disliked(), false)
+            } else {
+                self.menu_entry("dislike", "Не нравится", icons.get_m_dislike(), false)
+            };
+            items.push(entry);
         }
         items.push(self.menu_entry("playlist", "Добавить в плейлист", icons.get_m_add_playlist(), true));
         if t.lyrics && current {
@@ -3225,6 +3242,7 @@ impl Ctx {
             crate::i18n::set_lang(l);
             app.set_lang(l.into());
             ui.global::<T>().set_lang(l.into());
+            keys::show(&app);
             let mut st = self.st.borrow_mut();
             st.cfg.lang = l.to_string();
             st.cfg.save();
@@ -3409,8 +3427,11 @@ impl Ctx {
         }
         if !l.tracks.is_empty() {
             items.push(self.menu_entry("list-playlist", "Добавить в плейлист", icons.get_m_add_playlist(), true));
-            // У «Мне нравится» скачивание вынесено кнопкой в шапку.
-            if !likes {
+            let downloading = self.st.borrow().download.as_ref().is_some_and(|(folder, _)| *folder == l.title);
+            if downloading {
+                items.push(self.menu_entry("list-download-stop", "Отменить скачивание", icons.get_m_download(), false));
+            } else if !likes {
+                // У «Мне нравится» скачивание вынесено кнопкой в шапку.
                 items.push(self.menu_entry("list-download", "Скачать", icons.get_m_download(), false));
             }
         }
@@ -3818,6 +3839,11 @@ impl Ctx {
                 "like" => self.list_like(),
                 "trailer" => self.ui().global::<App>().invoke_list_trailer(),
                 "download" => self.ui().global::<App>().invoke_list_download(),
+                "download-stop" => {
+                    if let Some((_, stop)) = &self.st.borrow().download {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                }
                 "vibe" => {
                     let Some(data) = self.list() else { return };
                     let Data::List(l) = &*data else { return };
@@ -3860,7 +3886,7 @@ impl Ctx {
                 self.toast(format!("Скачиваем «{}»", t.title));
                 std::thread::spawn(move || {
                     let names = legacy_names(std::slice::from_ref(&t));
-                    let res = save_track(&api, &dir, &t, &names, flac);
+                    let res = save_track(&api, &dir, &t, &names, flac, &AtomicBool::new(false));
                     net.say(match res {
                         Ok(p) => format!("Сохранено: {}", p.display()),
                         Err(e) => format!("Не удалось скачать: {e}"),
@@ -3875,7 +3901,7 @@ impl Ctx {
                 self.player.send(Cmd::Enqueue { track: t, next: false });
                 self.toast("Трек добавлен в конец очереди");
             }
-            "dislike" => self.player.send(Cmd::Dislike),
+            "dislike" => self.dislike(),
             "lyrics" => self.open_fullscreen(2),
             "share-link" => {
                 sys::copy_text(&track_link(&t));
@@ -4327,6 +4353,14 @@ impl Ctx {
         }))));
     }
 
+    fn dislike(self: &Rc<Self>) {
+        let Some(net) = self.st.borrow().net.clone() else { return };
+        self.player.send(Cmd::Dislike(Some(Box::new(move || {
+            net.refresh("likes");
+            net.refresh("collection");
+        }))));
+    }
+
     fn like_toast(self: &Rc<Self>, t: &Track, liked: bool) {
         let msg = if liked {
             format!("Трек «{}» добавлен в плейлист «Мне нравится»", t.title)
@@ -4461,12 +4495,13 @@ impl Ctx {
         if tracks.is_empty() {
             return;
         }
-        if self.st.borrow().downloading {
+        if self.st.borrow().download.is_some() {
             self.toast("Скачивание уже идёт");
             return;
         }
         let Some(net) = self.st.borrow().net.clone() else { return };
-        self.st.borrow_mut().downloading = true;
+        let stop = Arc::new(AtomicBool::new(false));
+        self.st.borrow_mut().download = Some((folder.clone(), stop.clone()));
         self.toast(format!("Скачиваем {}", tracks_word(tracks.len() as u64)));
         let api = net.api.clone();
         let dir = music_dir(&self.st.borrow().cfg).join(file_name(&folder));
@@ -4476,8 +4511,12 @@ impl Ctx {
             let (mut ok, mut failed) = (0, 0);
             let names = legacy_names(&tracks);
             for (i, t) in tracks.iter().enumerate() {
-                match save_track(&api, &dir, t, &names, flac) {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                match save_track(&api, &dir, t, &names, flac, &stop) {
                     Ok(_) => ok += 1,
+                    Err(_) if stop.load(Ordering::Relaxed) => break,
                     Err(e) => {
                         failed += 1;
                         log(format!("скачивание {}: {e}", t.id));
@@ -4487,12 +4526,14 @@ impl Ctx {
                     net.say(format!("Скачано {} из {total}", i + 1));
                 }
             }
-            net.say(if failed == 0 {
+            net.say(if stop.load(Ordering::Relaxed) {
+                format!("Скачивание отменено, скачано {ok} из {total}: {}", dir.display())
+            } else if failed == 0 {
                 format!("Скачано {ok} из {total}: {}", dir.display())
             } else {
                 format!("Скачано {ok} из {total}, не удалось {failed}: {}", dir.display())
             });
-            let _ = slint::invoke_from_event_loop(|| with_ctx(|c| c.st.borrow_mut().downloading = false));
+            let _ = slint::invoke_from_event_loop(|| with_ctx(|c| c.st.borrow_mut().download = None));
         });
     }
 }
@@ -4598,11 +4639,11 @@ fn download_location(dir: &std::path::Path, t: &Track, names: &DownloadNames<'_>
     free.map(|stem| (stem, None)).ok_or_else(|| ErrorKind::AlreadyExists.into())
 }
 
-fn confirmed_legacy(file: &mut std::fs::File, id: &str, cache: &std::path::Path, verify: impl FnOnce(&mut std::fs::File) -> std::io::Result<bool>) -> std::io::Result<bool> {
+fn confirmed_legacy(file: &mut std::fs::File, id: &str, cache: &std::path::Path, stop: &AtomicBool, verify: impl FnOnce(&mut std::fs::File) -> std::io::Result<bool>) -> std::io::Result<bool> {
     use sha2::{Digest, Sha256};
     if crate::api::saved_payload(file).is_err() { return Ok(false); }
     let mut hash = Sha256::new();
-    std::io::copy(file, &mut hash)?;
+    std::io::copy(&mut crate::api::cancellable_reader(&mut *file, stop), &mut hash)?;
     let receipt = cache.join(format!("{:x}-{:x}", Sha256::digest(id.as_bytes()), hash.finalize()));
     if std::fs::symlink_metadata(&receipt).is_ok_and(|m| m.is_file()) { return Ok(true); }
     if !verify(file)? { return Ok(false); }
@@ -4632,16 +4673,18 @@ fn open_download(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 }
 
 /// Каждая загрузка готовит собственный файл и публикует его после записи тегов.
-fn save_track(api: &Api, dir: &std::path::Path, t: &Track, names: &DownloadNames<'_>, flac: bool) -> Result<std::path::PathBuf, String> {
+fn save_track(api: &Api, dir: &std::path::Path, t: &Track, names: &DownloadNames<'_>, flac: bool, stop: &AtomicBool) -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let receipts = crate::config::dir().join("legacy-downloads");
     let locate = |formats: &[&str]| download_location(dir, t, names, formats, |file| {
-        confirmed_legacy(file, &t.id, &receipts, |file| {
+        confirmed_legacy(file, &t.id, &receipts, stop, |file| {
+            crate::api::check_download(stop)?;
             let (url, _) = api.stream_url(&t.id).map_err(std::io::Error::other)?;
-            api.matches_saved_audio(&url, file)
+            api.matches_saved_audio(&url, file, stop)
         })
     }).map_err(|e| e.to_string());
     let (mut stem, existing) = locate(AUDIO_FORMATS)?;
+    crate::api::check_download(stop).map_err(|e| e.to_string())?;
     let mut upgrade_url = None;
     if let Some(path) = existing {
         if !flac || path.extension().is_some_and(|ext| ext == "flac") { return Ok(path); }
@@ -4653,7 +4696,7 @@ fn save_track(api: &Api, dir: &std::path::Path, t: &Track, names: &DownloadNames
         };
         if path.extension().is_some_and(|ext| ext == "m4a") {
             let mut file = open_download(&path).map_err(|e| e.to_string())?;
-            if api.matches_saved_audio(&url, &mut file).map_err(|e| e.to_string())? { return Ok(path); }
+            if api.matches_saved_audio(&url, &mut file, stop).map_err(|e| e.to_string())? { return Ok(path); }
         }
         let (available, lossless) = locate(&["flac"])?;
         if let Some(path) = lossless { return Ok(path); }
@@ -4664,11 +4707,13 @@ fn save_track(api: &Api, dir: &std::path::Path, t: &Track, names: &DownloadNames
     let part = scratch.path().join("audio.part");
     let mut last = String::new();
     for attempt in 0..3 {
+        if stop.load(Ordering::Relaxed) { return Err(crate::api::STOPPED.into()); }
         if attempt > 0 {
             std::thread::sleep(Duration::from_secs(2 * attempt));
         }
+        if stop.load(Ordering::Relaxed) { return Err(crate::api::STOPPED.into()); }
         let url = upgrade_url.clone().map_or_else(|| crate::save::download_url(api, t, flac), Ok);
-        match url.and_then(|u| api.download_to(&u, &part)) {
+        match url.and_then(|u| api.download_to(&u, &part, stop)) {
             Ok(n) if n > 0 => {
                 last.clear();
                 break;
@@ -4720,16 +4765,17 @@ fn save_track(api: &Api, dir: &std::path::Path, t: &Track, names: &DownloadNames
     let path = dir.join(format!("{stem}.{ext}"));
     let mut file = open_download(&completed).map_err(|e| e.to_string())?;
     let temp = tempfile::TempPath::try_from_path(completed).map_err(|e| e.to_string())?;
+    if stop.load(Ordering::Relaxed) { return Err(crate::api::STOPPED.into()); }
     match temp.persist_noclobber(&path) {
         Ok(()) => {}
         Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
             let mut winner = open_download(&path).map_err(|e| e.to_string())?;
-            let same = crate::api::same_saved_files(&mut file, &mut winner).map_err(|e| e.to_string())?;
+            let same = crate::api::same_saved_files(&mut file, &mut winner, stop).map_err(|e| e.to_string())?;
             if !same { return Err("Выбранное имя уже занято другим файлом".into()); }
         }
         Err(e) => return Err(e.error.to_string()),
     }
-    let _ = confirmed_legacy(&mut file, &t.id, &receipts, |_| Ok(true));
+    let _ = confirmed_legacy(&mut file, &t.id, &receipts, stop, |_| Ok(true));
     Ok(path)
 }
 
@@ -5114,12 +5160,12 @@ fn legacy_receipt_is_scoped_to_track_and_complete_payload() {
     let cache = tempfile::tempdir().unwrap();
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(b"fLaC-long-enough-for-a-header").unwrap();
-    assert!(confirmed_legacy(&mut file, "12", cache.path(), |_| Ok(true)).unwrap());
-    assert!(confirmed_legacy(&mut file, "12", cache.path(), |_| panic!("unnecessary network request")).unwrap());
-    assert!(!confirmed_legacy(&mut file, "13", cache.path(), |_| Ok(false)).unwrap());
+    assert!(confirmed_legacy(&mut file, "12", cache.path(), &AtomicBool::new(false), |_| Ok(true)).unwrap());
+    assert!(confirmed_legacy(&mut file, "12", cache.path(), &AtomicBool::new(false), |_| panic!("unnecessary network request")).unwrap());
+    assert!(!confirmed_legacy(&mut file, "13", cache.path(), &AtomicBool::new(false), |_| Ok(false)).unwrap());
     file.seek(std::io::SeekFrom::End(-1)).unwrap();
     file.write_all(b"x").unwrap();
-    assert!(!confirmed_legacy(&mut file, "12", cache.path(), |_| Ok(false)).unwrap());
+    assert!(!confirmed_legacy(&mut file, "12", cache.path(), &AtomicBool::new(false), |_| Ok(false)).unwrap());
 }
 
 #[cfg(test)]

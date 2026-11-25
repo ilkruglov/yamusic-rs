@@ -177,7 +177,7 @@ extern "system" fn on_action(_env: JNIEnv, _class: JClass, code: jint) {
                 p.send(Cmd::LikeTrack(t, None));
             }
         }
-        5 => p.send(Cmd::Dislike),
+        5 => p.send(Cmd::Dislike(None)),
         _ => {}
     }
 }

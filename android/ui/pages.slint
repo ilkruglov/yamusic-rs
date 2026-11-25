@@ -338,7 +338,6 @@ component ArtistHead inherits Rectangle {
     in property <PBlock> block;
     in property <Icons> icons;
     callback action(int);
-    height: min(self.width * 1.39, 580px);
     clip: true;
     background: root.block.bg;
     Image {
@@ -714,12 +713,15 @@ component BlockView inherits Rectangle {
     in property <PBlock> block;
     in property <int> index;
     in property <Icons> icons;
+    in property <length> artist-h;
     property <int> kind: root.block.kind;
     property <bool> has-heading: root.block.title != "" && root.kind != K.artist-head && root.kind != K.album-head && root.kind != K.list-head && root.kind != K.likes-head && root.kind != K.wave && root.kind != K.link && root.kind != K.about && root.kind != K.text && root.kind != K.empty;
     property <length> head-h: root.has-heading ? 56px : 0;
     property <length> top: root.head-h + (root.block.chips.length > 0 && root.kind != K.chips ? 52px : 0);
     property <int> columns: clamp(floor((root.width - 20px) / 160px), 2, 6);
     property <length> cell: (root.width - 32px - (root.columns - 1) * 12px) / root.columns;
+    property <length> release-w: root.width > 560px ? 320px : root.width - 24px;
+    property <length> about-w: root.width > 560px ? 320px : root.width - 32px;
     property <int> card-rows: ceil(root.block.cards.length / root.columns);
     property <int> pairs: ceil(max(root.block.cards.length, root.block.rows.length) / 2);
     property <length> body:
@@ -728,7 +730,7 @@ component BlockView inherits Rectangle {
         : root.kind == K.mixes ? 150px
         : root.kind == K.tracks || root.kind == K.numbered ? root.block.rows.length * 76px
         : root.kind == K.album-head ? 532px
-        : root.kind == K.releases ? root.width - 40px + 52px
+        : root.kind == K.releases ? root.release-w - 16px + 52px
         : root.kind == K.rows ? root.block.cards.length * 76px
         : root.kind == K.pair ? 84px
         : root.kind == K.promo ? (root.width - 32px) * 0.56 + 64px
@@ -738,10 +740,10 @@ component BlockView inherits Rectangle {
         : root.kind == K.concerts ? root.card-rows * (root.cell * 1.4 + 88px)
         : root.kind == K.shortcuts ? 112px
         : root.kind == K.link ? 96px
-        : root.kind == K.about ? (root.width - 32px) * 0.9 + 32px
+        : root.kind == K.about ? root.about-w * 0.9 + 32px
         : root.kind == K.tiles ? root.pairs * 92px
         : root.kind == K.suggest ? 72px
-        : root.kind == K.artist-head ? min(root.width * 1.39, 580px)
+        : root.kind == K.artist-head ? root.artist-h
         : root.kind == K.list-head ? 436px
         : root.kind == K.play ? 88px
         : root.kind == K.banners ? (root.width - 48px) * 0.6 + 64px
@@ -1143,11 +1145,11 @@ component BlockView inherits Rectangle {
     }
     if root.kind == K.about: Rectangle {
         y: root.top;
-        height: (self.width - 32px) * 0.9 + 32px;
+        height: root.about-w * 0.9 + 32px;
         Rectangle {
             x: 16px;
             y: 16px;
-            width: parent.width - 32px;
+            width: root.about-w;
             height: parent.height - 32px;
             border-radius: 16px;
             clip: true;
@@ -1266,6 +1268,7 @@ component BlockView inherits Rectangle {
     }
     if root.kind == K.artist-head: ArtistHead {
         y: root.top;
+        height: root.artist-h;
         block: root.block;
         icons: root.icons;
         action(n) => { Pages.action(root.index, n); }
@@ -1279,7 +1282,7 @@ component BlockView inherits Rectangle {
     // Новый релиз: фото исполнителя в круге, снизу на него заходит карточка альбома.
     if root.kind == K.releases: rel := Flickable {
         y: root.top;
-        property <length> w: self.width - 24px;
+        property <length> w: root.release-w;
         property <length> d: self.w - 16px;
         height: root.body;
         content-width: 12px + root.block.cards.length * (self.w + 8px) + 4px;
@@ -1590,6 +1593,7 @@ export component PageView inherits Rectangle {
                 block: b;
                 index: i;
                 icons: root.icons;
+                artist-h: root.artist-h;
             }
         }
     }
@@ -1616,7 +1620,9 @@ export component PageView inherits Rectangle {
     }
 
     // Шапка: над фото исполнителя прозрачная, пока страницу не прокрутили.
-    property <length> head-h: root.page.blocks.length > 0 && root.page.blocks[0].kind == K.album-head ? 532px : min(root.width * 1.39, 580px);
+    // Лёжа на планшете фото не выше трёх четвертей экрана.
+    property <length> artist-h: min(root.width * 1.39, 580px, root.height * 0.72);
+    property <length> head-h: root.page.blocks.length > 0 && root.page.blocks[0].kind == K.album-head ? 532px : root.artist-h;
     property <bool> solid: !root.page.overlay || -list.content-y > root.head-h - root.bar-y - root.bar-h - 40px;
     Rectangle {
         y: 0;

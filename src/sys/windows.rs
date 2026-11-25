@@ -431,16 +431,41 @@ pub fn hostname() -> Option<String> {
 
 /// Скопировать текст в буфер обмена.
 pub fn copy_text(text: &str) {
-    use std::io::Write as _;
-    use std::os::windows::process::CommandExt;
-    if let Ok(mut child) = std::process::Command::new("clip")
-        .creation_flags(0x0800_0000)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_UNICODETEXT: u32 = 13;
+    let data = wide(text);
+    unsafe {
+        // Копирование вызывается из окна интерфейса. После EmptyClipboard
+        // это окно становится владельцем и может передать текст системе.
+        let owner = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow();
+        if owner.is_null() { return; }
+        // Буфер может быть на миг занят другой программой.
+        let opened = (0..10).any(|_| {
+            let ok = OpenClipboard(owner) != 0;
+            if !ok {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            ok
+        });
+        if !opened {
+            return;
         }
-        let _ = child.wait();
+        let mem = GlobalAlloc(GMEM_MOVEABLE, data.len() * 2);
+        if !mem.is_null() {
+            let dst = GlobalLock(mem);
+            // После удачного SetClipboardData памятью владеет система.
+            if dst.is_null() {
+                GlobalFree(mem);
+            } else {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), dst.cast::<u16>(), data.len());
+                GlobalUnlock(mem);
+                if EmptyClipboard() == 0 || SetClipboardData(CF_UNICODETEXT, mem).is_null() {
+                    GlobalFree(mem);
+                }
+            }
+        }
+        CloseClipboard();
     }
 }

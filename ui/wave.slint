@@ -11,6 +11,8 @@ component GlassButton inherits Rectangle {
     in property <bool> enabled: true;
     out property <bool> hovered: ta.has-hover;
     in property <bool> highlight-icon: hovered;
+    /// Колёсико над кнопкой меняет громкость.
+    in property <bool> scroll-volume;
     callback clicked;
     width: 48px;
     height: 48px;
@@ -40,6 +42,13 @@ component GlassButton inherits Rectangle {
     ta := TouchArea {
         enabled: root.enabled;
         mouse-cursor: MouseCursor.pointer;
+        scroll-event(e) => {
+            if !root.scroll-volume {
+                return reject;
+            }
+            App.set-volume(max(0, min(1, App.volume + (e.delta-y > 0 ? 0.02 : -0.02))));
+            accept
+        }
         pointer-event(e) => {
             if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
                 root.ripple = false;
@@ -508,6 +517,7 @@ export component WavePage inherits Rectangle {
             height: 48px;
             property <bool> open: vol.hovered || vol-pop.hovered || bridge.has-hover;
             vol := GlassButton {
+                scroll-volume: true;
                 highlight-icon: self.hovered || vol-pop.hovered;
                 icon: App.volume <= 0 ? Icons.volume-off : Icons.volume;
                 clicked => { App.toggle-mute(); }
@@ -524,7 +534,7 @@ export component WavePage inherits Rectangle {
                 glass: true;
             }
         }
-        GlassButton { y: 8px; icon: Icons.dislike; enabled: App.is-wave; clicked => { App.dislike(); } }
+        GlassButton { y: 8px; icon: App.disliked ? Icons.disliked : Icons.dislike; enabled: App.is-wave; clicked => { App.dislike(); } }
         // Плашка трека — она же полоса перемотки: закрашена слева по прогрессу.
         pill := Rectangle {
             width: min(346px, text-w - 4 * 52px);

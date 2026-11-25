@@ -169,7 +169,7 @@ export component PlayerBar inherits Rectangle {
                 clicked(i) => { App.open-current-artist(i); }
             }
 
-            BarButton { x: c - 188px; y: 18px; width: 44px; height: 44px; icon: Icons.dislike; enabled: on && App.is-wave; clicked => { App.dislike(); } }
+            BarButton { x: c - 188px; y: 18px; width: 44px; height: 44px; icon: App.disliked ? Icons.disliked : Icons.dislike; enabled: on; clicked => { App.dislike(); } }
             TransportButton { x: c - 128px; y: 24px; icon: Icons.shuffle; enabled: on && !App.is-wave; active: App.shuffle; ink-hover: self.ink; clicked => { App.toggle-shuffle(); } }
             TransportButton { x: c - 80px; y: 18px; width: 44px; height: 44px; icon: Icons.prev-small; icon-size: 20px; enabled: on && App.can-prev; clicked => { App.prev(); } }
             BarPlayButton { x: c - 32px; y: 20px; }
@@ -195,6 +195,7 @@ export component PlayerBar inherits Rectangle {
                 x: parent.width - 49px;
                 y: 24px;
                 icon: App.volume <= 0 ? Icons.volume-off : Icons.volume;
+                scroll-volume: true;
                 active: false;
                 ink: vol-open ? #ffffffe6 : #ffffff80;
                 clicked => { App.toggle-mute(); }
@@ -327,6 +328,7 @@ export component MiniPlayer inherits Rectangle {
             width: 24px;
             height: 24px;
             icon: App.volume <= 0 ? Icons.volume-off : Icons.volume;
+            scroll-volume: true;
             icon-size: 16px;
             clicked => { App.toggle-mute(); }
         }

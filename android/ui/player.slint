@@ -160,7 +160,8 @@ export component Player inherits Rectangle {
     property <length> lyrics-width: min(root.width - 48px, 720px);
     property <length> lyrics-y: root.split ? 76px : 112px;
     property <length> card-y: root.base + 423px;
-    property <length> card-h: 422px;
+    property <length> card-h: root.split ? 340px : 422px;
+    property <length> card-w: root.split ? 320px : root.w;
     property <length> similar-y: root.card-y + (Now.artist-cards.length > 0 ? root.card-h + 32px : 0);
     property <length> playlists-y: root.similar-y + (Now.similar.length > 0 ? 64.4px + Now.similar.length * 76.6px + 21px : 0);
     property <length> buttons-y: root.playlists-y + (Now.playlists.length > 0 ? 74.3px + Now.playlists.length * 96px + 3px : 0);
@@ -457,9 +458,9 @@ export component Player inherits Rectangle {
                 PillButton {
                     x: controls.width - root.side - 72px;
                     y: 246.3px;
-                    icon: Now.icons.download;
-                    icon-size: 24px;
-                    clicked => { Now.download(); }
+                    icon: Now.shuffle ? Now.icons.shuffle-on : Now.icons.shuffle;
+                    active: Now.shuffle;
+                    clicked => { Now.toggle-shuffle(); }
                 }
             }
 
@@ -521,11 +522,11 @@ export component Player inherits Rectangle {
                 y: root.card-y;
                 width: body.width;
                 height: Now.artist-cards.length > 0 ? root.card-h : 0;
-                content-width: max(self.width, Now.artist-cards.length * (root.w + 8px) + 2 * root.side - 8px);
+                content-width: max(self.width, Now.artist-cards.length * (root.card-w + 8px) + 2 * root.side - 8px);
                 content-height: self.height;
                 for card[i] in Now.artist-cards: Rectangle {
-                    x: root.side + i * (root.w + 8px);
-                    width: root.w;
+                    x: root.side + i * (root.card-w + 8px);
+                    width: root.card-w;
                     height: root.card-h;
                     border-radius: 16px;
                     clip: true;
@@ -550,7 +551,7 @@ export component Player inherits Rectangle {
                     }
                     Text {
                         x: 16px;
-                        y: 345px;
+                        y: root.card-h - 77px;
                         width: parent.width - 96px;
                         text: card.name;
                         color: #fff;
@@ -561,7 +562,7 @@ export component Player inherits Rectangle {
                     }
                     if card.listeners != "": HorizontalLayout {
                         x: 16px;
-                        y: 388px;
+                        y: root.card-h - 34px;
                         height: 20px;
                         spacing: 6px;
                         Image {
@@ -581,7 +582,7 @@ export component Player inherits Rectangle {
                     }
                     Rectangle {
                         x: parent.width - 64px;
-                        y: 353px;
+                        y: root.card-h - 69px;
                         width: 48px;
                         height: 48px;
                         border-radius: 24px;
@@ -876,6 +877,17 @@ export component Player inherits Rectangle {
         font-size: 14px;
         font-weight: 500;
         horizontal-alignment: center;
+    }
+    // Название альбома или плейлиста в шапке открывает его.
+    TouchArea {
+        x: 56px;
+        y: root.header-y;
+        width: root.width - 160px;
+        height: 48px;
+        clicked => {
+            root.open = false;
+            Now.open-source();
+        }
     }
     Rectangle {
         x: 327.6px - 12px + root.width - 411.4px;

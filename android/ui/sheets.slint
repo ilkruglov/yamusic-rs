@@ -65,7 +65,7 @@ component RoundItem inherits Rectangle {
 /// Меню «⋮» трека из списка.
 export component TrackSheet inherits Sheet {
     open <=> Pages.menu-open;
-    panel-height: 676px;
+    panel-height: 724px;
     Cover {
         x: 16px;
         y: 38.4px;
@@ -178,6 +178,15 @@ export component TrackSheet inherits Sheet {
     }
     MenuItem {
         y: 400px;
+        icon: Now.icons.download;
+        text: "Скачать";
+        clicked => {
+            root.open = false;
+            Pages.menu-action(9);
+        }
+    }
+    MenuItem {
+        y: 448px;
         icon: Now.icons.add;
         text: "Добавить в плейлист";
         clicked => {
@@ -186,7 +195,7 @@ export component TrackSheet inherits Sheet {
         }
     }
     MenuItem {
-        y: 448px;
+        y: 496px;
         icon: Now.icons.album;
         text: "Перейти к альбому";
         clicked => {
@@ -195,7 +204,7 @@ export component TrackSheet inherits Sheet {
         }
     }
     MenuItem {
-        y: 496px;
+        y: 544px;
         icon: Now.icons.listeners;
         text: "Перейти к исполнителю";
         clicked => {
@@ -205,13 +214,13 @@ export component TrackSheet inherits Sheet {
     }
     Rectangle {
         x: 16px;
-        y: 556px;
+        y: 604px;
         width: parent.width - 32px;
         height: 1px;
         background: T.fg.with-alpha(0.10);
     }
     MenuItem {
-        y: 564px;
+        y: 612px;
         icon: Now.icons.dislike;
         text: "Не нравится";
         grey: true;
@@ -313,7 +322,7 @@ export component ArtistsSheet inherits Sheet {
 export component MenuSheet inherits Sheet {
     callback lyrics();
     callback playlists();
-    panel-height: 668px;
+    panel-height: 716px;
 
     Cover {
         x: 16px;
@@ -440,6 +449,15 @@ export component MenuSheet inherits Sheet {
     }
     MenuItem {
         y: 459.4px;
+        icon: Now.icons.download;
+        text: "Скачать";
+        clicked => {
+            root.open = false;
+            Now.download();
+        }
+    }
+    MenuItem {
+        y: 507.4px;
         icon: Now.icons.add;
         text: "Добавить в плейлист";
         clicked => {
@@ -448,7 +466,7 @@ export component MenuSheet inherits Sheet {
         }
     }
     if Now.has-lyrics: MenuItem {
-        y: 507.4px;
+        y: 555.4px;
         icon: Now.icons.text;
         text: "Показать текст песни";
         clicked => {
@@ -458,13 +476,13 @@ export component MenuSheet inherits Sheet {
     }
     Rectangle {
         x: 16px;
-        y: 572px;
+        y: 620px;
         width: parent.width - 32px;
         height: 1px;
         background: T.fg.with-alpha(0.10);
     }
     MenuItem {
-        y: 579.5px;
+        y: 627.5px;
         icon: Now.icons.dislike;
         text: "Не нравится";
         grey: true;

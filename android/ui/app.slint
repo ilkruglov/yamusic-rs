@@ -149,7 +149,24 @@ component LoginScreen inherits Rectangle {
     }
 }
 
-export component App inherits Window {
+// Свайп «назад» от края Android отменяет касание, а Slint превращает отмену в обычное
+// отпускание, и кнопка под пальцем нажимается (#107). Касание от края, ушедшее внутрь,
+// забирает себе этот обработчик, а кнопке достаётся отмена.
+component EdgeSwipeGuard inherits Window {
+    // Зоны системных жестов: «назад» у боковых кромок, «домой» снизу. Жест
+    // «назад» начинают не у самой кромки, поэтому боковые полосы шире системных (#123).
+    property <length> edge: 48px;
+    SwipeGestureHandler {
+        width: root.width;
+        height: root.height;
+        handle-swipe-left: self.pressed-position.x > root.width - root.edge;
+        handle-swipe-right: self.pressed-position.x < root.edge;
+        handle-swipe-up: self.pressed-position.y > root.height - max(24px, root.safe-area-insets.bottom);
+        @children
+    }
+}
+
+export component App inherits EdgeSwipeGuard {
     background: transparent;
     default-font-family: "YS Text";
 
@@ -163,7 +180,8 @@ export component App inherits Window {
     out property <bool> wave-moving: Prof.wave-motion && root.logged-in && !Pages.shown && !player.open;
     out property <length> wave-shift: root.wide-wave ? root.rail-width + min(600px, (root.width - root.rail-width) * 0.52) / 2 - root.width / 2 : 0px;
     property <length> rail-width: root.rail ? 88px : 0px;
-    property <length> nav-height: root.rail ? 0px : 83.8px;
+    // Вкладки 64 dp и системная навигация под ними: полоска жестов или три кнопки (#96).
+    property <length> nav-height: (root.rail ? 0px : 64px) + root.safe-area-insets.bottom;
     property <length> page-bottom: root.nav-height + (Now.has-track ? 84px : 16px);
     in property <string> login-code;
     in property <string> login-hint;
@@ -202,10 +220,12 @@ export component App inherits Window {
         width: root.width - self.x;
         height: root.height - root.nav-height;
         visible: !Pages.shown;
+        // Нижние карточки колеса не заходят на вкладки (#120).
+        clip: true;
 
         property <length> header-y: self.height < 680px ? 24px : T.top + 6px;
         property <length> portrait-offset: root.rail && !root.wide-wave ? clamp((self.height - 850px) / 2, 0px, 180px) : 0px;
-        property <length> wheel-y: root.wide-wave ? max(76px, (self.height - 176px) / 2) : min(600px + portrait-offset, max(202px, self.height - 148px));
+        property <length> wheel-y: root.wide-wave ? max(76px, (self.height - 176px) / 2) : max(202px, min(576px + portrait-offset, self.height - 162px) - (root.rail ? 0px : 10px));
         property <length> track-y: root.wide-wave ? min(450.3px, self.height - 68px) : min(450.3px + portrait-offset, wheel-y - 64px);
         property <length> art-size: clamp(track-y - header-y - 106px, 48px, 96px);
         property <length> play-y: track-y - art-size - 12px;
@@ -305,7 +325,7 @@ export component App inherits Window {
             }
 
             // Во время игры: имя исполнителя, его фото без фона и маленькая обложка.
-            if root.started: Rectangle {
+            if root.started: playing-wave := Rectangle {
                 probe := Text {
                     visible: false;
                     text: Now.artist;
@@ -313,7 +333,11 @@ export component App inherits Window {
                     font-weight: 900;
                     font-size: 56px;
                 }
-                property <length> name-y: Now.cutout.width > 0 ? wave.header-y + 62px : max(wave.header-y + 40px, wave.play-y - 80px);
+                property <length> portrait-y: wave.header-y + 132px;
+                property <length> portrait-height: max(0px, wave.track-y - portrait-y - 12px);
+                // Обложка перекрывает низ фото, на низком экране от него осталась бы одна голова.
+                property <bool> show-portrait: Now.cutout.width > 0 && portrait-height >= wave.art-size * 2;
+                property <length> name-y: show-portrait ? wave.header-y + 62px : max(wave.header-y + 40px, wave.play-y - 80px);
                 TouchArea {
                     y: parent.name-y;
                     height: 64px;
@@ -331,11 +355,16 @@ export component App inherits Window {
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
-                if Now.cutout.width > 0: TouchArea {
-                    y: wave.header-y + 72px;
-                    width: min(parent.width - 56px, self.height);
-                    height: max(0px, wave.track-y - self.y);
+                if playing-wave.show-portrait: TouchArea {
+                    x: (parent.width - self.width) / 2;
+                    y: parent.portrait-y;
+                    width: min(parent.width - 48px, self.height * 1.12);
+                    height: parent.portrait-height;
                     Image {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
                         source: Now.cutout;
                         image-fit: contain;
                     }

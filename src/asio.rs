@@ -238,6 +238,10 @@ impl Stream {
         Ok(stream)
     }
 
+    pub(crate) fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+
     pub(crate) fn sink(
         &self,
         track: impl Source<Item = f32> + Send + 'static,

@@ -43,7 +43,7 @@ pub fn start(api: Arc<Api>, folder: &str, tracks: Vec<Track>) {
                 ok += 1;
                 continue;
             }
-            match save_track(&api, &tmp, t, flac).and_then(|file| move_to(&file, &dir)) {
+            match save_track(&api, &tmp, t, flac, &AtomicBool::new(false)).and_then(|file| move_to(&file, &dir)) {
                 Ok(path) => {
                     sys::scan_file(&path);
                     ok += 1;

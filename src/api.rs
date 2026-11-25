@@ -25,17 +25,17 @@ pub(crate) fn saved_payload(file: &mut std::fs::File) -> std::io::Result<(u64, u
     Ok((start, size))
 }
 
-pub(crate) fn same_saved_files(left: &mut std::fs::File, right: &mut std::fs::File) -> std::io::Result<bool> {
+pub(crate) fn same_saved_files(left: &mut std::fs::File, right: &mut std::fs::File, stop: &std::sync::atomic::AtomicBool) -> std::io::Result<bool> {
     use std::io::Seek;
     right.rewind()?;
     let len = right.metadata()?.len();
-    same_saved_audio(left, right, Some(len), None)
+    same_saved_audio(left, right, Some(len), None, stop)
 }
 
-fn same_saved_audio(local: &mut std::fs::File, remote: impl std::io::Read, length: Option<u64>, checksum: Option<&str>) -> std::io::Result<bool> {
+fn same_saved_audio(local: &mut std::fs::File, remote: impl std::io::Read, length: Option<u64>, checksum: Option<&str>, stop: &std::sync::atomic::AtomicBool) -> std::io::Result<bool> {
     use std::io::{Cursor, Read, Seek, SeekFrom};
     let (start, size) = saved_payload(local)?;
-    let mut remote = remote;
+    let mut remote = cancellable_reader(remote, stop);
     let mut head = [0; 10];
     remote.read_exact(&mut head)?;
     let tag = crate::tags::existing_id3_len(&head) as u64;
@@ -45,7 +45,7 @@ fn same_saved_audio(local: &mut std::fs::File, remote: impl std::io::Read, lengt
     if std::io::copy(&mut remote.by_ref().take(tag), &mut md5)? != tag { return Ok(false); }
     if let Some(hash) = checksum.filter(|s| s.len() == 32 && s.bytes().all(|c| c.is_ascii_hexdigit())) {
         // Некоторые CDN используют MD5 всего объекта как сильный ETag.
-        std::io::copy(local, &mut md5)?;
+        std::io::copy(&mut cancellable_reader(&mut *local, stop), &mut md5)?;
         if hash.eq_ignore_ascii_case(&format!("{:x}", md5.finalize())) { return Ok(true); }
         local.seek(SeekFrom::Start(start))?;
     }
@@ -72,13 +72,41 @@ fn legacy_audio_matches_after_tag_replacement() {
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&audio).unwrap();
     let etag = format!("{:x}", Md5::digest(&remote));
-    assert!(same_saved_audio(&mut file, &remote[..], Some(remote.len() as u64), None).unwrap());
-    assert!(same_saved_audio(&mut file, &remote[..15], Some(remote.len() as u64), Some(&etag)).unwrap());
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    assert!(same_saved_audio(&mut file, &remote[..], Some(remote.len() as u64), None, &stop).unwrap());
+    assert!(same_saved_audio(&mut file, &remote[..15], Some(remote.len() as u64), Some(&etag), &stop).unwrap());
     remote[20_000] = 17;
-    assert!(!same_saved_audio(&mut file, &remote[..], None, None).unwrap());
+    assert!(!same_saved_audio(&mut file, &remote[..], None, None, &stop).unwrap());
+}
+
+#[cfg(test)]
+#[test]
+fn cancellation_stops_legacy_audio_verification_before_network() {
+    let api = Api::new("");
+    let mut file = tempfile::tempfile().unwrap();
+    let error = api.matches_saved_audio("invalid URL", &mut file, &std::sync::atomic::AtomicBool::new(true)).unwrap_err();
+    assert_eq!(error.to_string(), STOPPED);
+}
+
+/// Проверяем отмену перед каждым чтением файла или ответа CDN.
+pub(crate) fn cancellable_reader<'a, R: std::io::Read + 'a>(input: R, stop: &'a std::sync::atomic::AtomicBool) -> impl std::io::Read + 'a {
+    struct Reader<'a, R>(R, &'a std::sync::atomic::AtomicBool);
+    impl<R: std::io::Read> std::io::Read for Reader<'_, R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            check_download(self.1)?;
+            self.0.read(buf)
+        }
+    }
+    Reader(input, stop)
+}
+
+pub(crate) fn check_download(stop: &std::sync::atomic::AtomicBool) -> std::io::Result<()> {
+    if stop.load(std::sync::atomic::Ordering::Relaxed) { Err(std::io::Error::other(STOPPED)) } else { Ok(()) }
 }
 
 pub const WAVE: &str = "user:onyourwave";
+/// Ошибка `download_to`, когда загрузку остановили.
+pub const STOPPED: &str = "остановлено";
 /// Срок одного запроса к аудиофайлу. Что не успело скачаться, докачает следующий запрос.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1650,12 +1678,21 @@ impl Api {
             .map(|_| ())
     }
 
-    pub fn dislike(&self, uid: &str, track_full_id: &str) -> Res<()> {
+    pub fn dislike(&self, uid: &str, track_full_id: &str, remove: bool) -> Res<()> {
+        let action = if remove { "remove" } else { "add-multiple" };
         self.send(
-            self.req(Method::POST, &format!("/users/{uid}/dislikes/tracks/add-multiple"))
+            self.req(Method::POST, &format!("/users/{uid}/dislikes/tracks/{action}"))
                 .form(&[("track-ids", track_full_id)]),
         )
-        .map(|v| crate::config::log(format!("dislike {track_full_id}: {v}")))
+        .map(|v| crate::config::log(format!("dislike {action} {track_full_id}: {v}")))
+    }
+
+    pub fn disliked_ids(&self, uid: &str) -> Res<Vec<String>> {
+        let v = self.get(&format!("/users/{uid}/dislikes/tracks"), &[])?;
+        Ok(v.pointer("/library/tracks")
+            .and_then(|t| t.as_array())
+            .map(|a| a.iter().filter_map(|x| s(x.get("id"))).collect())
+            .unwrap_or_default())
     }
 
     // ---------- каталог ----------
@@ -1787,7 +1824,8 @@ impl Api {
 
     /// Название (`name`) или описание (`description`) плейлиста.
     pub fn set_playlist_field(&self, uid: &str, kind: &str, field: &str, value: &str) -> Res<()> {
-        self.send(self.req(Method::POST, &format!("/users/{uid}/playlists/{kind}/{field}")).query(&[("value", value)])).map(|_| ())
+        // В строке запроса описание длиннее ~800 букв сервер отбивает с 431, в форме длина не ограничена.
+        self.send(self.req(Method::POST, &format!("/users/{uid}/playlists/{kind}/{field}")).form(&[("value", value)])).map(|_| ())
     }
 
     pub fn delete_playlist(&self, uid: &str, kind: &str) -> Res<()> {
@@ -1934,23 +1972,38 @@ impl Api {
         Ok((str_of(di, "codec"), url.to_string()))
     }
 
-    pub(crate) fn matches_saved_audio(&self, url: &str, file: &mut std::fs::File) -> std::io::Result<bool> {
+    pub(crate) fn matches_saved_audio(&self, url: &str, file: &mut std::fs::File, stop: &std::sync::atomic::AtomicBool) -> std::io::Result<bool> {
+        check_download(stop)?;
         let response = self.http.get(url).send().and_then(|r| r.error_for_status()).map_err(std::io::Error::other)?;
         let length = response.content_length();
         let etag = response.headers().get(reqwest::header::ETAG).and_then(|h| h.to_str().ok())
             .and_then(|v| v.strip_prefix('"')?.strip_suffix('"')).map(str::to_owned);
-        same_saved_audio(file, response, length, etag.as_deref())
+        same_saved_audio(file, response, length, etag.as_deref(), stop)
     }
 
     /// Скачать файл потоком на диск, без чтения целиком в память. Ссылки уже подписаны — без токена.
-    pub fn download_to(&self, url: &str, path: &std::path::Path) -> Res<u64> {
+    /// Поднятый `stop` прерывает загрузку на следующем куске.
+    pub fn download_to(&self, url: &str, path: &std::path::Path, stop: &std::sync::atomic::AtomicBool) -> Res<u64> {
+        use std::io::{Read as _, Write as _};
         let mut resp = self.http.get(url).send().map_err(|e| format!("сеть: {}", crate::config::chain(&e)))?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));
         }
         let expected = resp.content_length();
         let mut f = std::fs::File::create(path).map_err(|e| format!("файл: {e}"))?;
-        let n = std::io::copy(&mut resp, &mut f).map_err(|e| format!("загрузка прервалась: {e}"))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut n = 0u64;
+        loop {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(STOPPED.into());
+            }
+            let k = resp.read(&mut buf).map_err(|e| format!("загрузка прервалась: {e}"))?;
+            if k == 0 {
+                break;
+            }
+            f.write_all(&buf[..k]).map_err(|e| format!("файл: {e}"))?;
+            n += k as u64;
+        }
         f.sync_all().map_err(|e| format!("файл: {e}"))?;
         if expected.is_some_and(|e| e != n) {
             return Err(format!("загрузка оборвалась: {n} из {} байт", expected.unwrap_or(0)));
@@ -2013,5 +2066,5 @@ fn shorter_chunked_audio_is_a_different_track() {
     let payload = vec![42; 32_768];
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&payload).unwrap();
-    assert!(!same_saved_audio(&mut file, &payload[..21_000], None, None).unwrap());
+    assert!(!same_saved_audio(&mut file, &payload[..21_000], None, None, &std::sync::atomic::AtomicBool::new(false)).unwrap());
 }

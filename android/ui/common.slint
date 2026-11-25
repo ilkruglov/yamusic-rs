@@ -18,6 +18,8 @@ export struct Icons {
     dislike: image,
     repeat: image,
     repeat-one: image,
+    shuffle: image,
+    shuffle-on: image,
     lyrics: image,
     download: image,
     timer: image,
@@ -93,6 +95,7 @@ export global Now {
     in property <string> status;
     // 0 выкл, 1 по кругу, 2 один трек.
     in property <int> repeat;
+    in property <bool> shuffle;
     in property <bool> has-lyrics;
     in property <[string]> lyrics;
     // Строка, которая поётся сейчас; -1 — текст без времени.
@@ -114,6 +117,7 @@ export global Now {
     callback dislike();
     callback seek(float);
     callback toggle-repeat();
+    callback toggle-shuffle();
     callback track-wave();
     callback share();
     callback download();
@@ -129,6 +133,7 @@ export global Now {
     // -1 — первый исполнитель текущего трека.
     callback open-artist(int);
     callback open-album();
+    callback open-source();
     callback open-playlists();
     // Что играет вместо обычной волны: плейлист, альбом, вайб. Пусто — обычная волна.
     in property <string> pill;

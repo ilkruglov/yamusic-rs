@@ -25,6 +25,7 @@ mod mpris;
 #[cfg(windows)]
 mod smtc;
 mod net;
+mod output;
 mod palette;
 mod player;
 mod save;
