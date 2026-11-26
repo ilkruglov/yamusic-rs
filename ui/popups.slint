@@ -174,6 +174,7 @@ export component TrackMenu inherits Rectangle {
             text: m.text;
             icon: m.icon;
             submenu: m.submenu;
+            checked: m.checked;
             themed: App.menu-themed;
             active: App.submenu-open == i;
             hovered => { App.submenu-open = m.submenu ? i : -1; }
@@ -246,11 +247,16 @@ component EqSlider inherits Rectangle {
     in property <float> value;
     in property <float> min-value: -12;
     in property <float> max-value: 12;
+    in property <float> reset-value: 0;
     in property <bool> enabled;
     callback changed(float);
     width: 13px;
     height: 144px;
     property <float> k: (value - min-value) / (max-value - min-value);
+    function set-from-y(y: length) {
+        let fraction = 1 - clamp((y - 8px) / (root.height - 16px), 0, 1);
+        root.changed(root.min-value + fraction * (root.max-value - root.min-value));
+    }
     Rectangle {
         x: 6px;
         width: 1px;
@@ -263,7 +269,7 @@ component EqSlider inherits Rectangle {
         height: 1px;
         background: Theme.controls-color-primary-default-disabled;
     }
-    Rectangle {
+    thumb := Rectangle {
         x: -2px;
         y: (1 - k) * (root.height - 16px);
         width: 16px;
@@ -275,17 +281,25 @@ component EqSlider inherits Rectangle {
     }
     TouchArea {
         x: -8px;
+        y: 0;
         width: 29px;
+        height: root.height;
         enabled: root.enabled;
         mouse-cursor: MouseCursor.pointer;
+        property <length> grab-offset;
         pointer-event(e) => {
-            if e.kind == PointerEventKind.down {
-                root.changed(root.min-value + (1 - max(0, min(1, (self.mouse-y - 8px) / (root.height - 16px)))) * (root.max-value - root.min-value));
+            if e.kind != PointerEventKind.down { return; }
+            if e.button == PointerEventButton.left {
+                let offset = self.mouse-y - (thumb.y + thumb.height / 2);
+                self.grab-offset = abs(offset) <= thumb.height / 2 ? offset : 0px;
+                root.set-from-y(self.mouse-y - self.grab-offset);
+            } else if e.button == PointerEventButton.right {
+                root.changed(root.reset-value);
             }
         }
         moved => {
             if self.pressed {
-                root.changed(root.min-value + (1 - max(0, min(1, (self.mouse-y - 8px) / (root.height - 16px)))) * (root.max-value - root.min-value));
+                root.set-from-y(self.mouse-y - self.grab-offset);
             }
         }
     }
@@ -329,19 +343,11 @@ component QualityItem inherits Rectangle {
     }
 }
 
-// «Настройки звука»: качество и эквалайзер, окно оригинала 430×612.
-export component SoundSettings inherits Rectangle {
+// «Настройки звука»: выбор качества и эквалайзер.
+component SoundSettingsContent inherits Rectangle {
     width: 430px;
     height: 353px + eq-block.height;
-    border-radius: 16px;
-    background: Theme.background-color-primary-enabled-popover;
-    border-width: 1px;
-    border-color: Theme.outline-color-primary-disabled;
-    drop-shadow-blur: 20px;
-    drop-shadow-offset-y: 1px;
-    drop-shadow-color: Theme.dark ? #0000007a : #0000003d;
     property <bool> presets-open;
-    TouchArea { }
 
     Text {
         x: 21px;
@@ -444,6 +450,7 @@ export component SoundSettings inherits Rectangle {
             y: 18px;
             min-value: 0.5;
             max-value: 1.5;
+            reset-value: 1.0;
             value: App.eq-preamp;
             enabled: App.eq-on;
             changed(v) => { App.eq-set-preamp(v); }
@@ -534,5 +541,27 @@ export component SoundSettings inherits Rectangle {
                 }
             }
         }
+    }
+}
+
+export component SoundSettings inherits Rectangle {
+    in property <length> available-height;
+    width: settings.width;
+    height: min(available-height, settings.height);
+    border-radius: 16px;
+    background: Theme.background-color-primary-enabled-popover;
+    border-width: 1px;
+    border-color: Theme.outline-color-primary-disabled;
+    drop-shadow-blur: 20px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: Theme.dark ? #0000007a : #0000003d;
+    TouchArea { }
+
+    Flickable {
+        content-width: self.width;
+        content-height: settings.height;
+        interactive: self.content-height > self.height;
+        mouse-drag-pan-enabled: false;
+        settings := SoundSettingsContent { x: 0; y: 0; }
     }
 }

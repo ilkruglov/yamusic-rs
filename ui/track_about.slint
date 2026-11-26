@@ -1,0 +1,137 @@
+// Окно «О треке» / «О выпуске» / «О главе» (`TrackAboutModalDesktop`, чанк 1824, модуль 46371):
+// панель справа, в шапке название, версия и E, ниже участники записи строками «роль — имя».
+
+import { Theme } from "theme.slint";
+import { Icons, Icon, ExplicitMark } from "widgets.slint";
+import { App, InfoLine } from "state.slint";
+
+// Строка `InfoBlock`: заголовок (h4, шрифт заголовков 16 medium) и под ним значение (Caption
+// оригинала: text l, medium), между ними 4. Строка не ниже 24 — `line-height` оригинала
+// (`font-line-height-label-l`), иначе блоки стоят теснее, чем у него.
+component InfoRow inherits VerticalLayout {
+    in property <InfoLine> line;
+    callback clicked;
+    spacing: Theme.spacer-size-xxxs;
+    if line.title != "": Text {
+        text: line.title;
+        wrap: word-wrap;
+        min-height: Theme.font-line-height-label-l;
+        font-family: App.headline-font;
+        font-size: Theme.font-size-label-l;
+        font-weight: 500;
+        color: Theme.controls-color-primary-text-enabled-variant;
+    }
+    Text {
+        text: line.value;
+        wrap: word-wrap;
+        min-height: Theme.font-line-height-label-l;
+        font-size: Theme.font-size-label-l;
+        font-weight: 500;
+        color: line.link && link-ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
+        animate color { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+        link-ta := TouchArea {
+            enabled: line.link;
+            mouse-cursor: line.link ? MouseCursor.pointer : MouseCursor.default;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// Заглушка (`TextShimmer` с классом `textShimmer`): полоса 12 в 30% ширины, скругление s,
+// цвет `background-color-secondary-enabled-blur`. Без анимации, как у оригинала (isActive нет).
+component TextShimmer inherits Rectangle {
+    height: 12px;
+    Rectangle {
+        x: 0;
+        width: parent.width * 0.3;
+        border-radius: Theme.radius-size-s;
+        background: Theme.background-color-secondary-enabled-blur;
+    }
+}
+
+export component TrackAboutModal inherits Rectangle {
+    width: 430px;
+    border-radius: Theme.radius-size-xl;
+    border-width: 1px;
+    border-color: Theme.outline-color-primary-disabled;
+    background: Theme.background-color-primary-enabled-popover;
+    drop-shadow-blur: 20px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: Theme.dark ? #0000007a : #0000003d;
+    TouchArea { }
+
+    // Шапка: поля 20 сверху и снизу, 16 по бокам; крестик 32 справа.
+    header := HorizontalLayout {
+        x: 17px;
+        y: 1px;
+        width: root.width - 34px;
+        height: 72px;
+        padding-top: Theme.spacer-size-xl;
+        padding-bottom: Theme.spacer-size-xl;
+        spacing: Theme.spacer-size-xxs;
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            spacing: 6px;
+            alignment: start;
+            Text {
+                text: App.track-about-title;
+                overflow: elide;
+                vertical-alignment: center;
+                font-family: App.headline-font;
+                font-size: Theme.font-size-headline-xs;
+                font-weight: 700;
+                color: Theme.controls-color-primary-text-enabled-variant;
+            }
+            if App.track-about-version != "": Text {
+                text: App.track-about-version;
+                overflow: elide;
+                vertical-alignment: center;
+                font-family: App.headline-font;
+                font-size: Theme.font-size-headline-xs;
+                font-weight: 700;
+                color: Theme.controls-color-primary-text-enabled;
+            }
+            if App.track-about-explicit: VerticalLayout {
+                alignment: center;
+                ExplicitMark { size: 16px; }
+            }
+        }
+        Rectangle {
+            width: 32px;
+            height: 32px;
+            border-radius: 16px;
+            background: close-ta.has-hover ? Theme.controls-color-secondary-default-hovered : Theme.controls-color-secondary-default-enabled;
+            animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+            Icon { source: Icons.close-small; size: 20px; colorize: Theme.controls-color-primary-text-enabled-variant; }
+            close-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { App.track-about-open = false; }
+            }
+        }
+    }
+
+    // Содержимое: прокрутка колесом, сверху 20, между строками 16, снизу поле 20; справа 15 —
+    // место полосы прокрутки оригинала (`scrollbar-gutter: stable`), чтобы ширина строк была
+    // как у него.
+    Flickable {
+        x: 1px;
+        y: header.y + header.height;
+        width: root.width - 2px;
+        height: root.height - self.y - 1px - Theme.spacer-size-xl;
+        content-height: body.preferred-height;
+        body := VerticalLayout {
+            x: Theme.spacer-size-l;
+            width: root.width - 2px - 2 * Theme.spacer-size-l - 15px;
+            padding-top: Theme.spacer-size-xl;
+            spacing: Theme.spacer-size-l;
+            alignment: start;
+            for line[i] in App.track-about-lines: VerticalLayout {
+                if line.shimmer: TextShimmer { }
+                if !line.shimmer: InfoRow {
+                    line: line;
+                    clicked => { App.track-about-link(i); }
+                }
+            }
+        }
+    }
+}

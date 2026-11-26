@@ -41,6 +41,7 @@ export struct PBlock {
     text: string,
     bg: color,
     liked: bool,
+    disliked: bool,
 }
 
 export struct PPage {
@@ -88,13 +89,22 @@ export global Pages {
     in property <string> menu-duration;
     in property <bool> menu-liked;
     callback menu(int, int);
-    // 0 волна по треку, 1 лайк, 2 следующим, 3 в очередь, 4 поделиться, 6 альбом, 7 исполнитель, 8 дизлайк.
+    // 0 волна по треку, 1 лайк, 2 следующим, 3 в очередь, 4 поделиться, 6 альбом, 7 исполнитель, 8 дизлайк, 10 о треке.
     callback menu-action(int);
     callback pick(int);
 
     in-out property <bool> artists-open;
     in property <[string]> artist-names;
     callback pick-artist(int);
+
+    // «О треке»: участники записи, роль над именем.
+    in-out property <bool> about-open;
+    in property <string> about-title;
+    in property <string> about-artists;
+    in property <[string]> about-roles;
+    in property <[string]> about-names;
+    in property <string> about-status;
+    callback about-current();
 }
 
 // Номера видов блоков, те же в pages.rs.
@@ -386,7 +396,7 @@ component ArtistHead inherits Rectangle {
         y: root.height - 108px;
         height: 100px;
         alignment: center;
-        spacing: 16px;
+        spacing: 4px;
         RoundButton {
             icon: root.block.liked ? root.icons.liked : root.icons.like;
             tint: root.block.liked ? #ff0 : #fff;
@@ -404,6 +414,12 @@ component ArtistHead inherits Rectangle {
             tint: #000;
             label: "Слушать";
             clicked => { root.action(2); }
+        }
+        RoundButton {
+            icon: root.icons.dislike;
+            tint: root.block.disliked ? #ff0 : #fff;
+            label: "Не нравится";
+            clicked => { root.action(3); }
         }
     }
 }

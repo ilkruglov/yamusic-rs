@@ -451,7 +451,18 @@ component ListContent inherits TouchArea {
             height: 21px;
             spacing: 3px;
             Text { text: T.t("Лейбл:"); font-size: Theme.font-size-label-s; color: Theme.controls-color-primary-text-enabled; vertical-alignment: center; }
-            Text { text: App.list-label; font-size: Theme.font-size-label-s; font-weight: 500; color: Theme.controls-color-primary-text-enabled-variant; vertical-alignment: center; }
+            Text {
+                text: App.list-label;
+                font-size: Theme.font-size-label-s;
+                font-weight: 500;
+                color: label-link.has-hover && label-link.enabled ? Theme.controls-color-primary-text-enabled : Theme.controls-color-primary-text-enabled-variant;
+                vertical-alignment: center;
+                label-link := TouchArea {
+                    enabled: App.list-label-id != "";
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { App.open-grid("label:" + App.list-label-id, App.list-label); }
+                }
+            }
         }
     }
     ScrollBar {

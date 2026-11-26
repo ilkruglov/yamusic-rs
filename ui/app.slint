@@ -1,7 +1,7 @@
 // Главное окно: своя рамка, навбар, страницы, нижний плеер и всплывающие слои поверх.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, IconButton, CircleButton, PillButton, Cover, Shimmer, Fade } from "widgets.slint";
+import { Icons, Icon, IconButton, CircleButton, PillButton, Cover, Shimmer, Fade, TipLayer } from "widgets.slint";
 import { Navbar } from "navbar.slint";
 import { PlayerBar, MiniPlayer } from "playerbar.slint";
 import { ListPage } from "list.slint";
@@ -14,12 +14,13 @@ import { GridPage } from "grid.slint";
 import { AccountMenu, SettingsPage, LoginScreen } from "account.slint";
 import { FullscreenPlayer } from "fullscreen.slint";
 import { TrackMenu, SoundSettings } from "popups.slint";
-import { ShortcutsModal } from "modals.slint";
-import { T, App, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry } from "state.slint";
+import { ShortcutsModal, OverviewModal } from "modals.slint";
+import { TrackAboutModal } from "track_about.slint";
+import { T, App, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, InfoLine } from "state.slint";
 import { LandingPage, ChartPage } from "landing.slint";
 import { HistoryPage } from "history.slint";
 
-export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry }
+export { Theme, Icons, App, T, Page, TrackItem, PinItem, CardItem, TopArtistItem, WheelEntry, ChartRow, LyricLine, MenuEntry, InfoLine }
 
 component CaptionButton inherits Rectangle {
     in property <int> kind; // 0 свернуть, 1 развернуть, 2 закрыть, 3 мини-плеер
@@ -92,6 +93,8 @@ export component AppWindow inherits Window {
     property <length> gap: Theme.spacer-size-m;
     property <length> pad-r: 12px;
     property <length> bar-h: new-vibe ? 0px : 80px;
+    property <length> bar-y: root.height - pad-r - bar-h;
+    property <length> sound-bottom: bar-h > 0 ? bar-y - gap - 16px : root.height - 16px;
 
     // Фон «Моей волны»: 16 ступеней палитры трека справа налево, как у оригинала.
     // На паузе все ступени чёрные: сплошная заливка вместо градиента на всё окно.
@@ -136,13 +139,25 @@ export component AppWindow inherits Window {
         if App.page == Page.artists: Fade { rise: 8px; MyArtistsPage { } }
         if App.page == Page.settings: Fade { rise: 8px; SettingsPage { } }
         if App.page == Page.grid: Fade { rise: 8px; GridPage { } }
-        if App.page == Page.trends || App.page == Page.concerts || App.page == Page.nonmusic: Fade { rise: 8px; LandingPage { } }
+        if App.page == Page.trends || App.page == Page.concerts || App.page == Page.nonmusic || App.page == Page.landing: Fade { rise: 8px; LandingPage { } }
         if App.page == Page.chart: Fade { rise: 8px; ChartPage { } }
         if App.page == Page.history: Fade { rise: 8px; HistoryPage { } }
-        if App.page != Page.list && App.page != Page.collection && App.page != Page.wave && App.page != Page.search && App.page != Page.artist && App.page != Page.artists && App.page != Page.settings && App.page != Page.grid && App.page != Page.trends && App.page != Page.concerts && App.page != Page.nonmusic && App.page != Page.chart && App.page != Page.history: Text {
+        if App.page != Page.list && App.page != Page.collection && App.page != Page.wave && App.page != Page.search && App.page != Page.artist && App.page != Page.artists && App.page != Page.settings && App.page != Page.grid && App.page != Page.trends && App.page != Page.concerts && App.page != Page.nonmusic && App.page != Page.chart && App.page != Page.history && App.page != Page.landing: Text {
             text: T.t("Раздел в разработке");
             color: Theme.controls-color-primary-text-enabled;
             font-size: Theme.font-size-headline-xs;
+        }
+
+        // «Далее» у описания жанра: окно справа снизу в области страницы, подложка прозрачная,
+        // клик мимо закрывает (OverviewBlock_modalOverlay оригинала).
+        if App.overview-open: TouchArea { clicked => { App.overview-open = false; } }
+        if App.overview-open: Fade {
+            x: parent.width - overview.width - Theme.spacer-size-l;
+            y: parent.height - overview.height - Theme.spacer-size-l;
+            width: overview.width;
+            height: overview.height;
+            rise: 8px;
+            overview := OverviewModal { limit: content.height - 2 * Theme.spacer-size-l; }
         }
     }
 
@@ -191,11 +206,16 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Клик по странице закрывает панель. Плеер остаётся поверх этой области.
+    if App.eq-open: TouchArea {
+        clicked => { App.eq-open = false; }
+    }
+
     if bar-h > 0: PlayerBar {
         x: content.x;
-        y: parent.height - pad-r - 80px;
+        y: bar-y;
         width: content.width;
-        height: 80px;
+        height: bar-h;
     }
 
     if App.fullscreen: Rectangle {
@@ -207,17 +227,38 @@ export component AppWindow inherits Window {
         FullscreenPlayer { }
     }
 
-    if App.eq-open: TouchArea {
-        clicked => { App.eq-open = false; }
-    }
-    // Настройки звука, как QualitySettingsModal: в правом нижнем углу с отступом 16.
+    // Панель открывается над плеером и растёт вверх при включении эквалайзера.
     if App.eq-open: Fade {
         x: parent.width - sound.width - 16px;
-        y: parent.height - sound.height - 16px;
+        y: sound-bottom - sound.height;
         width: sound.width;
         height: sound.height;
         rise: 8px;
-        sound := SoundSettings { }
+        sound := SoundSettings { available-height: max(0px, sound-bottom - top); }
+    }
+
+    // «О треке» (TrackAboutModalDesktop): панель справа на прозрачной подложке, клик мимо
+    // закрывает. Отступы — как у оригинала в приложении для Windows (`root_withCustomControls`):
+    // 40 от верха и 12 от правого края контента, высота — окно без 156; низ, как у оригинала,
+    // срезает край контента. Поверх полноэкранного плеера — от краёв окна, высота — окно без 64.
+    if App.track-about-open: TouchArea {
+        clicked => { App.track-about-open = false; }
+    }
+    if App.track-about-open: Rectangle {
+        x: App.fullscreen ? 0 : content.x + content.border-width;
+        y: App.fullscreen ? 0 : content.y + content.border-width;
+        width: App.fullscreen ? parent.width : content.width - 2 * content.border-width;
+        height: App.fullscreen ? parent.height : content.height - 2 * content.border-width;
+        border-radius: App.fullscreen ? 0 : max(0px, content.border-radius - content.border-width);
+        clip: true;
+        Fade {
+            x: parent.width - self.width - Theme.spacer-size-m;
+            y: Theme.spacer-size-xxxxl;
+            width: 430px;
+            height: root.height - (App.fullscreen ? 2 * Theme.spacer-size-xxl + Theme.spacer-size-l : 156px);
+            rise: 8px;
+            TrackAboutModal { height: parent.height; }
+        }
     }
 
     // «Горячие клавиши»: по центру на затемнённой подложке, клик мимо закрывает.
@@ -410,6 +451,13 @@ export component AppWindow inherits Window {
     }
 
     if App.mini: MiniPlayer {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+    }
+
+    TipLayer {
         x: 0;
         y: 0;
         width: parent.width;

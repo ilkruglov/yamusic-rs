@@ -512,14 +512,17 @@ component VibeButton inherits Rectangle {
     ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
 }
 
+// Наборы вайбов с вкладками; волны жанров (EDITORIAL_WAVES) — без вкладок, волна тега
+// (META_TAG_WAVE) — и без заголовка: у оригинала это та же лента кнопок.
 component VibeSets inherits Rectangle {
     in property <LBlock> block;
     in property <int> index;
     property <length> w: (self.width - 32px) / 3;
     property <[LCard]> cards: block.cards;
+    property <length> top: block.tabs.length > 0 ? 97px : block.title == "" ? 0px : block.desc != "" ? 62px : 45px;
     strip := Strip { count: cards.length; step: root.w + 16px; item-w: root.w; width: root.width; }
-    LHeader { x: 0; y: 0; width: root.width; block: root.block; index: root.index; arrows: cards.length > 3; can-back: strip.can-back; can-forward: strip.can-forward; back => { strip.back(); } forward => { strip.forward(); } }
-    height: 97px + 64px;
+    if block.title != "": LHeader { x: 0; y: 0; width: root.width; block: root.block; index: root.index; arrows: cards.length > 3; can-back: strip.can-back; can-forward: strip.can-forward; back => { strip.back(); } forward => { strip.forward(); } }
+    height: top + 64px;
     HorizontalLayout {
         y: 37px;
         height: 44px;
@@ -532,7 +535,7 @@ component VibeSets inherits Rectangle {
         }
     }
     Rectangle {
-        y: 97px;
+        y: root.top;
         height: 64px;
         clip: true;
         for c[i] in cards: VibeButton {
@@ -1028,6 +1031,89 @@ component ContinueListen inherits Rectangle {
     }
 }
 
+// «Все жанры» (ITEM_LIST): заголовки-ссылки в три колонки, между колонками 20, между
+// строками 6 (ItemList_root). Две колонки — на окне уже 1060 px: здесь по ширине колонки
+// блоков при развёрнутом меню.
+component ItemList inherits Rectangle {
+    in property <LBlock> block;
+    in property <int> index;
+    property <int> cols: self.width >= 772px ? 3 : 2;
+    property <length> col-w: (self.width - (cols - 1) * Theme.spacer-size-xl) / cols;
+    height: ceil(block.cards.length / cols) * (26px + Theme.spacer-size-xxs) - Theme.spacer-size-xxs;
+    for c[i] in block.cards: Rectangle {
+        x: mod(i, root.cols) * (root.col-w + Theme.spacer-size-xl);
+        y: floor(i / root.cols) * (26px + Theme.spacer-size-xxs);
+        width: root.col-w;
+        height: 26px;
+        name := Text {
+            x: 0;
+            width: min(self.preferred-width, parent.width - 28px);
+            text: c.title;
+            overflow: elide;
+            vertical-alignment: center;
+            font-family: App.headline-font;
+            font-size: Theme.font-size-headline-m;
+            font-weight: 700;
+            color: Theme.controls-color-primary-text-enabled-variant;
+        }
+        Icon {
+            x: name.width + 4px;
+            y: 1px;
+            source: Icons.arrow-right;
+            size: 24px;
+            colorize: Theme.controls-color-primary-text-enabled;
+        }
+        TouchArea {
+            width: name.width + 28px;
+            x: 0;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { App.landing-open(root.index, i); }
+        }
+    }
+}
+
+// Описание жанра (OVERVIEW): текст 14/20 (text-m) в `lines` строк, шириной до 800, под ним
+// через 4 — «Далее», если текст не поместился; «Далее» открывает окно со всем текстом.
+component Overview inherits Rectangle {
+    in property <LBlock> block;
+    property <length> full: body.preferred-height;
+    property <bool> cut: block.lines > 0 && full > block.lines * 20px + 1px;
+    height: (cut ? block.lines * 20px + Theme.spacer-size-xxxs + 20px : full);
+    body := Text {
+        x: 0;
+        y: 0;
+        width: min(800px, root.width);
+        height: root.cut ? block.lines * 20px : root.full;
+        text: block.desc;
+        wrap: word-wrap;
+        overflow: elide;
+        font-size: Theme.font-size-label-m;
+        color: Theme.controls-color-primary-text-enabled-variant;
+    }
+    if root.cut: Rectangle {
+        x: 0;
+        y: body.height + Theme.spacer-size-xxxs;
+        width: further.preferred-width;
+        height: 20px;
+        further := Text {
+            text: T.t("Далее");
+            vertical-alignment: center;
+            font-size: Theme.font-size-label-m;
+            color: Theme.controls-color-primary-text-enabled-variant;
+        }
+        // Подчёркивание при наведении (OverviewBlock_button:hover).
+        if further-ta.has-hover: Rectangle { y: 18px; height: 1px; background: Theme.controls-color-primary-text-enabled-variant; }
+        further-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                App.overview-title = root.block.title;
+                App.overview-text = root.block.desc;
+                App.overview-open = true;
+            }
+        }
+    }
+}
+
 // Вкладки страницы: «Для вас» и «Тренды», «Книги» и «Подкасты».
 component PageTabs inherits Rectangle {
     height: 54px;
@@ -1082,6 +1168,8 @@ component BlockView inherits VerticalLayout {
     if k == "CONTINUE_LISTEN": ContinueListen { block: root.block; index: root.index; }
     if k == "CHART_ALBUMS": Cards { block: root.block; index: root.index; chart: true; }
     if k == "CARDS": Cards { block: root.block; index: root.index; }
+    if k == "ITEM_LIST": ItemList { block: root.block; index: root.index; }
+    if k == "OVERVIEW": Overview { block: root.block; }
     if k == "LOADING": Rectangle {
         height: 26px + 45px + 191px;
         Shimmer { x: 0; y: 0; width: 220px; height: 26px; border-radius: 8px; }
@@ -1105,15 +1193,24 @@ export component LandingPage inherits Rectangle {
             padding-top: 25px;
             padding-bottom: 20px;
             alignment: start;
-            // h1 оригинала: 32/32, вкладки на 27 px ниже.
-            Text {
+            // h1 оригинала: 32/32, вкладки на 27 px ниже. У лендинга по ссылке слева «назад»,
+            // между ними 16 (LandingPage_header: gap l).
+            HorizontalLayout {
                 height: 32px;
-                vertical-alignment: center;
-                text: App.landing-title;
-                font-family: App.headline-font;
-                font-size: 32px;
-                font-weight: 700;
-                color: Theme.controls-color-primary-text-enabled-variant;
+                spacing: Theme.spacer-size-l;
+                if App.landing-back && App.can-back: NavCircle {
+                    icon: Icons.arrow-left-small;
+                    clicked => { App.go-back(); }
+                }
+                Text {
+                    vertical-alignment: center;
+                    text: App.landing-title;
+                    overflow: elide;
+                    font-family: App.headline-font;
+                    font-size: 32px;
+                    font-weight: 700;
+                    color: Theme.controls-color-primary-text-enabled-variant;
+                }
             }
             if App.landing-location: Rectangle {
                 height: 24px + 46px;

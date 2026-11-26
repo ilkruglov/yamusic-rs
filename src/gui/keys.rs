@@ -426,7 +426,7 @@ impl Ctx {
     }
 
     /// Esc: закрывается самое верхнее — подменю, меню, подсказка, панель аккаунта, окно,
-    /// настройки звука; под полноэкранным плеером — обложка и настройки волны. Сам
+    /// настройки звука, «О треке»; под полноэкранным плеером — обложка и настройки волны. Сам
     /// полноэкранный плеер закрывает его FocusScope (`ui/fullscreen.slint`): если закрывать
     /// поверх нечего, Esc уходит интерфейсу.
     fn close_top(&self) -> bool {
@@ -444,8 +444,13 @@ impl Ctx {
             app.set_account_open(false);
         } else if app.get_shortcuts_open() {
             app.set_shortcuts_open(false);
+        } else if app.get_overview_open() {
+            app.set_overview_open(false);
         } else if app.get_eq_open() {
             app.set_eq_open(false);
+        } else if app.get_track_about_open() {
+            // «О треке» бывает и поверх полноэкранного плеера: закрывается первым.
+            app.set_track_about_open(false);
         } else if app.get_fullscreen() {
             return false;
         } else if app.get_cover_open() {

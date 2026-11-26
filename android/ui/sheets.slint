@@ -65,7 +65,7 @@ component RoundItem inherits Rectangle {
 /// Меню «⋮» трека из списка.
 export component TrackSheet inherits Sheet {
     open <=> Pages.menu-open;
-    panel-height: 724px;
+    panel-height: 772px;
     Cover {
         x: 16px;
         y: 38.4px;
@@ -212,15 +212,24 @@ export component TrackSheet inherits Sheet {
             Pages.menu-action(7);
         }
     }
+    MenuItem {
+        y: 592px;
+        icon: Now.icons.info;
+        text: "О треке";
+        clicked => {
+            root.open = false;
+            Pages.menu-action(10);
+        }
+    }
     Rectangle {
         x: 16px;
-        y: 604px;
+        y: 652px;
         width: parent.width - 32px;
         height: 1px;
         background: T.fg.with-alpha(0.10);
     }
     MenuItem {
-        y: 612px;
+        y: 660px;
         icon: Now.icons.dislike;
         text: "Не нравится";
         grey: true;
@@ -286,6 +295,69 @@ export component PickSheet inherits Sheet {
     }
 }
 
+/// «О треке»: название, исполнители и участники записи.
+export component AboutSheet inherits Sheet {
+    open <=> Pages.about-open;
+    panel-height: 150px + max(1, Pages.about-roles.length) * 60px;
+    Text {
+        x: 16px;
+        y: 30px;
+        text: "О треке";
+        color: T.fg;
+        font-size: 22px;
+        font-weight: 700;
+    }
+    Text {
+        x: 16px;
+        y: 70px;
+        width: parent.width - 32px;
+        text: Pages.about-title;
+        color: T.fg;
+        font-size: 17px;
+        font-weight: 500;
+        overflow: elide;
+    }
+    Text {
+        x: 16px;
+        y: 94px;
+        width: parent.width - 32px;
+        text: Pages.about-artists;
+        color: T.fg.with-alpha(0.55);
+        font-size: 15px;
+        overflow: elide;
+    }
+    if Pages.about-roles.length == 0: Text {
+        x: 16px;
+        y: 134px;
+        width: parent.width - 32px;
+        text: Pages.about-status;
+        color: T.fg.with-alpha(0.55);
+        font-size: 15px;
+    }
+    for role[i] in Pages.about-roles: Rectangle {
+        y: 130px + i * 60px;
+        height: 60px;
+        Text {
+            x: 16px;
+            y: 8px;
+            width: parent.width - 32px;
+            text: role;
+            color: T.fg.with-alpha(0.55);
+            font-size: 13px;
+            overflow: elide;
+        }
+        Text {
+            x: 16px;
+            y: 28px;
+            width: parent.width - 32px;
+            text: Pages.about-names[i];
+            color: T.fg;
+            font-size: 17px;
+            overflow: elide;
+        }
+    }
+}
+
 export component ArtistsSheet inherits Sheet {
     open <=> Pages.artists-open;
     panel-height: 112px + Pages.artist-names.length * 56px;
@@ -322,7 +394,7 @@ export component ArtistsSheet inherits Sheet {
 export component MenuSheet inherits Sheet {
     callback lyrics();
     callback playlists();
-    panel-height: 716px;
+    panel-height: 764px;
 
     Cover {
         x: 16px;
@@ -474,15 +546,24 @@ export component MenuSheet inherits Sheet {
             root.lyrics();
         }
     }
+    MenuItem {
+        y: Now.has-lyrics ? 603.4px : 555.4px;
+        icon: Now.icons.info;
+        text: "О треке";
+        clicked => {
+            root.open = false;
+            Pages.about-current();
+        }
+    }
     Rectangle {
         x: 16px;
-        y: 620px;
+        y: 668px;
         width: parent.width - 32px;
         height: 1px;
         background: T.fg.with-alpha(0.10);
     }
     MenuItem {
-        y: 627.5px;
+        y: 675.5px;
         icon: Now.icons.dislike;
         text: "Не нравится";
         grey: true;

@@ -54,6 +54,7 @@ enum Key {
     Search,
     Results(String),
     Landing(String, usize, String),
+    Tag(String),
     Artist(String),
     ArtistTracks(String),
     ArtistAlbums(String),
@@ -97,6 +98,7 @@ struct Block {
     text: String,
     bg: Option<[u8; 3]>,
     liked: bool,
+    disliked: bool,
 }
 
 impl Block {
@@ -256,6 +258,11 @@ pub fn start(ui: &App, api: Arc<Api>, player: Player) {
         menu(b, first + i as usize)
     });
     p.on_menu_action(menu_action);
+    p.on_about_current(|| {
+        if let Some(t) = with(|s| s.player.state().track).flatten() {
+            about(&t);
+        }
+    });
     p.on_pick(|i| pick(i as usize));
     p.on_pick_artist(|i| {
         if let Some(id) = ARTIST_IDS.with(|ids| ids.borrow().get(i as usize).cloned()) {
@@ -399,6 +406,7 @@ impl St {
             if let (Entity::Artist(id), Some(h)) = (&d.entity, d.head.first_mut()) {
                 if h.kind == ARTIST_HEAD {
                     h.liked = now::artist_liked(id);
+                    h.disliked = now::artist_disliked(id);
                 }
             }
         }
@@ -540,8 +548,9 @@ fn open_target(target: &str, title: &str) {
             let tab = p.next().and_then(|t| t.parse().ok()).unwrap_or(0);
             Key::Landing(skel, tab, title.into())
         }
-        "tag" | "query" => {
-            let q = if kind == "query" { arg } else { title };
+        "tag" => Key::Tag(arg.into()),
+        "query" => {
+            let q = arg;
             with(|s| {
                 s.open(Key::Search);
                 if let Some(ui) = s.ui.upgrade() {
@@ -628,17 +637,41 @@ fn menu_action(n: i32) {
             }
         }
         7 => open_artists(&t.artist_list),
-        8 => {
-            let uid = now::uid();
-            std::thread::spawn(move || {
-                if let Err(e) = api.dislike(&uid, &t.full_id(), false) {
-                    log(format!("дизлайк: {e}"));
-                }
-            });
-        }
+        8 => player.send(Cmd::DislikeTrack(t)),
         9 => crate::download::start(api, "", vec![t]),
+        10 => about(&t),
         _ => {}
     }
+}
+
+/// Шторка «О треке»: шапка сразу, участники записи — когда придут.
+pub fn about(t: &Track) {
+    let Some((Some(ui), api)) = with(|s| (s.ui.upgrade(), s.api.clone())) else { return };
+    let pages = ui.global::<Pages>();
+    let title = if t.version.is_empty() { t.title.clone() } else { format!("{} ({})", t.title, t.version) };
+    pages.set_about_title(title.into());
+    pages.set_about_artists(t.artists.clone().into());
+    pages.set_about_roles(ModelRc::default());
+    pages.set_about_names(ModelRc::default());
+    pages.set_about_status("Загрузка…".into());
+    pages.set_about_open(true);
+    let id = t.id.clone();
+    std::thread::spawn(move || {
+        let res = api.track_credits(&id);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = crate::UI.get().and_then(|w| w.upgrade()) else { return };
+            let pages = ui.global::<Pages>();
+            match res {
+                Ok(credits) if credits.is_empty() => pages.set_about_status("Нет данных об участниках записи".into()),
+                Ok(credits) => {
+                    let (roles, names): (Vec<SharedString>, Vec<SharedString>) = credits.into_iter().map(|(r, n)| (r.into(), n.into())).unzip();
+                    pages.set_about_roles(ModelRc::new(VecModel::from(roles)));
+                    pages.set_about_names(ModelRc::new(VecModel::from(names)));
+                }
+                Err(e) => pages.set_about_status(format!("Не удалось загрузить: {e}").into()),
+            }
+        });
+    });
 }
 
 fn pick(i: usize) {
@@ -718,11 +751,17 @@ fn action(b: usize, n: i32) {
                 s.player.send(Cmd::Wave(Source::Seed { station: format!("artist:{id}"), header: "Моя волна по исполнителю".into(), title: name }));
                 s.player.send(Cmd::Resume);
             }
-            (0, Entity::Artist(id)) => {
-                let liked = now::toggle_artist(id);
+            (0 | 3, Entity::Artist(id)) => {
+                if n == 0 {
+                    now::toggle_artist(id);
+                } else {
+                    now::toggle_artist_dislike(id);
+                }
+                let (liked, disliked) = (now::artist_liked(id), now::artist_disliked(id));
                 if let Some(e) = s.stack.last_mut() {
                     if let Some(bl) = e.data.as_mut().and_then(|d| d.visible_mut(b)) {
                         bl.liked = liked;
+                        bl.disliked = disliked;
                     }
                 }
                 s.rebuild_block(b);
@@ -796,9 +835,9 @@ fn search_edited(text: String, delay: Duration) {
             }
             return;
         }
+        let api = s.api.clone();
         let run = move || {
-            let Some(api) = with(|s| s.api.clone()) else { return };
-            let text = text.clone();
+            let (api, text) = (api.clone(), text.clone());
             std::thread::spawn(move || {
                 let res = fetch(&api, "", &Key::Results(text));
                 let _ = slint::invoke_from_event_loop(move || {
@@ -898,6 +937,7 @@ fn pblock(b: &Block, rows: Range<usize>, icons: &Icons) -> PBlock {
         text: b.text.clone().into(),
         bg: color(b.bg, Color::from_rgb_u8(0x55, 0x55, 0x55)),
         liked: b.liked,
+        disliked: b.disliked,
     }
 }
 
@@ -1104,6 +1144,10 @@ fn fetch(api: &Api, uid: &str, key: &Key) -> Result<PageData, String> {
             head.extend(load_blocks(api, &defs));
             PageData { has_search: true, ..PageData::new(title, head) }
         }
+        Key::Tag(id) => {
+            let (title, cards) = api.tag_playlists(id)?;
+            PageData::new(&title, vec![Block::cards(GRID, "", cards.iter().map(lcard_from).collect())])
+        }
         Key::Concerts => {
             let v = api.get_raw(FEED)?;
             let b = landing::parse_block("CONCERTS_PERSONAL", &v);
@@ -1203,7 +1247,20 @@ fn fetch(api: &Api, uid: &str, key: &Key) -> Result<PageData, String> {
                 .take(300)
                 .collect();
             let tracks = if ids.is_empty() { Vec::new() } else { api.tracks(&ids)? };
-            PageData::new("Ваши дизлайки", vec![Block::tracks("", tracks)])
+            let artists = api
+                .disliked_artists(uid)?
+                .into_iter()
+                .map(|a| LCard { title: a.name, covers: a.cover.into_iter().collect(), round: true, target: format!("artist:{}", a.id), ..Default::default() })
+                .collect();
+            let or_empty = |b: Block| if b.is_empty() { Block { text: "Здесь пока пусто".into(), ..Block::new(EMPTY, "") } } else { b };
+            let tabs = vec![
+                ("Треки".to_string(), vec![or_empty(Block::tracks("", tracks))]),
+                ("Исполнители".to_string(), vec![or_empty(Block::cards(GRID, "", artists))]),
+            ];
+            let mut d = PageData::new("Ваши дизлайки", vec![]);
+            d.head.push(Block { tabs: tabs.iter().map(|t| (t.0.clone(), Vec::new())).collect(), ..Block::new(CHIPS, "") });
+            d.tabs = tabs;
+            d
         }
         Key::Playlists | Key::Albums => {
             let (block, title, kind) = if *key == Key::Playlists {

@@ -39,6 +39,9 @@ fn view_kind(kind: &str) -> &str {
     match kind {
         "RECOMMENDED_PLAYLISTS" | "NEW_PLAYLISTS" | "EDITORIAL_COMPILATION" | "NON_MUSIC_EDITORIAL_COMPILATION" | "PERSONAL_PLAYLISTS"
         | "EDITORIAL_ARTISTS" | "PERSONAL_ARTISTS" | "EDITORIAL_ALBUMS" | "NON_MUSIC_CATALOG" => "CARDS",
+        // Лендинги жанров и подборок: у оригинала те же ленты карточек (модуль 84266 в 5772-…js).
+        "META_TAG_PLAYLISTS" | "META_TAG_POPULAR_PLAYLISTS" | "META_TAG_NEW_ALBUMS" | "META_TAG_POPULAR_ARTISTS" => "CARDS",
+        "EDITORIAL_WAVES" | "META_TAG_WAVE" => "WAVES",
         k => k,
     }
 }
@@ -62,6 +65,14 @@ impl Ctx {
         def.uri.as_ref().map(|u| format!("lblock:{}|{}", def.kind, u))
     }
 
+    /// Выбранная вкладка помнится по странице, у лендингов по скелету — по id скелета.
+    fn landing_tab_key(&self, page: Page) -> String {
+        match page {
+            Page::Landing => format!("landing:{}", self.st.borrow().landing_key.clone().unwrap_or_default()),
+            p => format!("{p:?}"),
+        }
+    }
+
     /// Блоки текущей вкладки: «шапка» скелета, полоса вкладок, блоки вкладки.
     fn landing_defs(&self, page: Page, sk: Option<&crate::landing::Skeleton>) -> Vec<BlockDef> {
         let def = |kind: &str, title: &str, uri: Option<&str>| BlockDef {
@@ -71,18 +82,24 @@ impl Ctx {
             desc: String::new(),
             uri: uri.map(String::from),
             more: false,
+            more_target: None,
+            text: String::new(),
+            lines: 0,
         };
         if page == Page::Concerts {
             return vec![def("CONCERTS_BIG", "Топ для вас", Some(FEED)), def("CONCERTS_GRID", "Концерты для вас", Some(FEED))];
         }
         let Some(sk) = sk else { return Vec::new() };
+        let key = self.landing_tab_key(page);
         let st = self.st.borrow();
         let shown = |d: &&BlockDef| !st.cfg.hidden_blocks.iter().any(|h| h.id == d.id);
         let mut out: Vec<BlockDef> = sk.head.iter().filter(shown).cloned().collect();
         if !sk.tabs.is_empty() {
-            let key = format!("{page:?}");
             let sel = LS.with(|l| l.borrow().tab.get(&key).copied()).unwrap_or(sk.selected).min(sk.tabs.len() - 1);
-            out.push(def("TABS", "", None));
+            // Одна вкладка («Эпохи», «Зимнее») — полосы вкладок нет, как у оригинала.
+            if sk.tabs.len() > 1 {
+                out.push(def("TABS", "", None));
+            }
             out.extend(sk.tabs[sel].blocks.iter().filter(shown).cloned());
         }
         out
@@ -111,13 +128,20 @@ impl Ctx {
         let app = ui.global::<App>();
         let page = app.get_page();
         let Some(net) = self.st.borrow().net.clone() else { return };
+        let landing_key = self.st.borrow().landing_key.clone().unwrap_or_default();
         let (title, skel) = match page {
             Page::Trends => ("Для вас и Тренды", Some("main")),
             Page::Nonmusic => ("Книги и подкасты", Some("non_music")),
             Page::Concerts => ("Концерты", None),
+            // Заголовок лендинга по ссылке — title скелета, он ставится, когда скелет придёт.
+            Page::Landing => ("", Some(landing_key.as_str())),
             _ => return,
         };
-        app.set_landing_title(crate::i18n::tr(title).into());
+        if page != Page::Landing {
+            app.set_landing_title(crate::i18n::tr(title).into());
+        }
+        // Кнопка «назад» у лендинга, открытого по ссылке (LandingPage оригинала: не корневой скелет и есть история).
+        app.set_landing_back(page == Page::Landing);
         if page == Page::Concerts && app.get_concert_date_bg().size().width == 0 {
             let size = self.size_for(94.0);
             let w = self.ui.clone();
@@ -149,6 +173,9 @@ impl Ctx {
             Data::Skeleton(s) => Some(s),
             _ => None,
         });
+        if let Some(sk) = sk.filter(|_| page == Page::Landing) {
+            app.set_landing_title(sk.title.as_str().into());
+        }
 
         // Новая страница, новый скелет или другая вкладка — модель собирается заново.
         let defs = self.landing_defs(page, sk);
@@ -164,8 +191,8 @@ impl Ctx {
                 && l.defs.iter().map(|d| &d.id).eq(defs.iter().map(|d| &d.id))
         });
         if !same {
-            if let Some(sk) = sk {
-                let key = format!("{page:?}");
+            if let Some(sk) = sk.filter(|sk| sk.tabs.len() > 1) {
+                let key = self.landing_tab_key(page);
                 let sel = LS.with(|l| l.borrow().tab.get(&key).copied()).unwrap_or(sk.selected).min(sk.tabs.len().saturating_sub(1));
                 let tabs: Vec<LTab> = sk.tabs.iter().map(|t| LTab { title: crate::i18n::tr(&t.title).into(), subtitle: t.subtitle.clone().into(), ..Default::default() }).collect();
                 let tabs_model = Rc::new(VecModel::from(tabs));
@@ -180,15 +207,18 @@ impl Ctx {
             }
             let rows: Vec<LBlock> = defs
                 .iter()
-                .map(|d| LBlock {
-                    kind: if d.kind == "TABS" {
-                        "TABS".into()
-                    } else if d.uri.is_some() {
-                        "LOADING".into()
-                    } else {
-                        SharedString::new()
+                .map(|d| match d.kind.as_str() {
+                    // Описание жанра приходит в самом скелете, без запроса.
+                    "OVERVIEW" if !d.text.is_empty() => LBlock {
+                        kind: "OVERVIEW".into(),
+                        title: d.title.clone().into(),
+                        desc: d.text.clone().into(),
+                        lines: d.lines as i32,
+                        ready: true,
+                        ..Default::default()
                     },
-                    ..Default::default()
+                    "TABS" => LBlock { kind: "TABS".into(), ..Default::default() },
+                    _ => LBlock { kind: if d.uri.is_some() { "LOADING".into() } else { SharedString::new() }, ..Default::default() },
                 })
                 .collect();
             let model = Rc::new(VecModel::from(rows));
@@ -268,7 +298,7 @@ impl Ctx {
             "ALBUM_PROMO" => (80.0, 321.0),
             "SIMPLE_ALBUM_PROMO" => (64.0, 64.0),
             "NEW_RELEASES" | "EDITORIAL_NEW_RELEASES" => (64.0, 282.0),
-            "SETS_BY_WAVES" | "WAVES" => (321.0, 0.0),
+            "SETS_BY_WAVES" | "WAVES" | "EDITORIAL_WAVES" | "META_TAG_WAVE" => (321.0, 0.0),
             "CONCERTS_BIG" => (333.0, 0.0),
             "CONCERTS_PERSONAL" | "CONCERTS_TOP" | "VIEWED_CONCERTS" | "CONCERTS_GRID" => (265.0, 0.0),
             "DONATIONS" => (156.0, 0.0),
@@ -378,8 +408,10 @@ impl Ctx {
         };
         let desc = if def.kind == "SPECIAL" { banner.subtitle.clone() } else { def.desc.clone() };
         let more = def.more || b.target.is_some() || def.kind == "CHART_TRACKS";
-        // На странице «Концерты» два блока и есть вся страница, их не прячем.
-        let can_hide = !def.id.is_empty() && !title.is_empty() && !matches!(def.kind.as_str(), "CONCERTS_BIG" | "CONCERTS_GRID");
+        // На странице «Концерты» два блока и есть вся страница, их не прячем. Скрывать можно
+        // блоки главной и «Книг и подкастов», не лендингов, открытых по ссылке.
+        let page = self.ui().global::<App>().get_page();
+        let can_hide = !def.id.is_empty() && !title.is_empty() && !matches!(def.kind.as_str(), "CONCERTS_BIG" | "CONCERTS_GRID") && page != Page::Landing;
         let row = LBlock {
             kind: kind.into(),
             title: crate::i18n::tr(&title).into(),
@@ -440,9 +472,9 @@ impl Ctx {
     }
 
     fn landing_select_tab(self: &Rc<Self>, k: usize) {
-        let page = self.ui().global::<App>().get_page();
+        let key = self.landing_tab_key(self.ui().global::<App>().get_page());
         LS.with(|l| {
-            l.borrow_mut().tab.insert(format!("{page:?}"), k);
+            l.borrow_mut().tab.insert(key, k);
         });
         self.refresh_landing();
     }
@@ -545,7 +577,7 @@ impl Ctx {
             return;
         }
         let Some(c) = self.landing_card(b, i) else { return };
-        let play = play || matches!(kind.as_str(), "SETS_BY_WAVES" | "WAVES" | "NEUROMUSIC");
+        let play = play || matches!(kind.as_str(), "SETS_BY_WAVES" | "WAVES" | "EDITORIAL_WAVES" | "META_TAG_WAVE" | "NEUROMUSIC");
         self.open_landing_target(&c.target, &c.title, play);
     }
 
@@ -561,6 +593,10 @@ impl Ctx {
             return self.navigate(Page::Chart, None, true);
         }
         if let Some(t) = &blk.target {
+            return self.open_target(t, &def.title);
+        }
+        // «Смотреть всё» с лендинга жанров ведёт на лендинг жанра или подборку (`viewAllAction.weblink`).
+        if let Some(t) = def.more_target.as_deref().filter(|t| t.starts_with("landing:") || t.starts_with("tag:")) {
             return self.open_target(t, &def.title);
         }
         // Новые релизы — как у оригинала: «Смотреть всё» берёт их из `entities` блока (до 100, с обложками

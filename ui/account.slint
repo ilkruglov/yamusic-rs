@@ -511,6 +511,18 @@ export component SettingsPage inherits Rectangle {
                 on: App.check-updates;
                 clicked => { App.setting("check-updates"); }
             }
+            // Пункт трея оригинала (`desktop.check-for-updates`) с итогом проверки: иначе ошибку
+            // GitHub видно только в журнале (#128).
+            SettingItem {
+                title: T.t("Проверить обновления");
+                desc: App.update-status;
+                clicked => { App.setting("update-check"); }
+            }
+            if App.update-failed: SettingItem {
+                title: T.t("Открыть страницу релизов");
+                desc: T.t("Скачать новую версию вручную");
+                clicked => { App.setting("releases"); }
+            }
             SettingItem {
                 title: T.t("Выйти из аккаунта");
                 desc: App.login;

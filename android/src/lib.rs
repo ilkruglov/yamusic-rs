@@ -721,6 +721,7 @@ fn load_icons(mut icon: impl FnMut(&str) -> Option<slint::Image>) -> Icons {
         sound: icon("ui_kit_ic_filter_24"),
         listeners: icon("ic_listeners_16"),
         explicit: icon("ui_kit_ic_circle_attention_outline_16"),
+        info: icon("ui_kit_ic_circle_attention_outline_16"),
         add: icon("ui_kit_ic_add_24"),
         fullscreen: icon("ui_kit_ic_full_screen_24"),
         arrow_right: icon("ic_arrow_right_small"),

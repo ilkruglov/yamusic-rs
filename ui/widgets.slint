@@ -109,6 +109,7 @@ export global Icons {
     in property <image> m-disliked;
     in property <image> m-add-playlist;
     in property <image> m-lyrics;
+    in property <image> m-queue;
     in property <image> m-share;
     in property <image> m-pin;
     in property <image> m-unpin;
@@ -196,11 +197,23 @@ export component BarButton inherits Rectangle {
     in property <brush> ink-off: #ffffff14;
     /// Колёсико над кнопкой меняет громкость.
     in property <bool> scroll-volume;
+    in property <string> tip;
     out property <bool> hovered: ta.has-hover;
     callback clicked;
     width: 32px;
     height: 32px;
     border-radius: self.width / 2;
+    property <bool> tip-hot: ta.has-hover && root.tip != "";
+    changed tip-hot => {
+        if self.tip-hot {
+            App.tip = root.tip;
+            App.tip-x = self.absolute-position.x + self.width / 2;
+            App.tip-y = self.absolute-position.y - 6px;
+            App.tip-above = true;
+        } else if App.tip == root.tip {
+            App.tip = "";
+        }
+    }
     HoverIcon {
         source: icon;
         size: root.icon-size;
@@ -218,6 +231,41 @@ export component BarButton inherits Rectangle {
             }
             App.set-volume(max(0, min(1, App.volume + (e.delta-y > 0 ? 0.02 : -0.02))));
             accept
+        }
+    }
+}
+
+// Подсказка поверх всего окна: появляется, если курсор задержался на месте.
+export component TipLayer inherits Rectangle {
+    property <string> pending: App.tip;
+    property <string> shown;
+    changed pending => { self.shown = ""; }
+    Timer {
+        interval: 600ms;
+        running: root.pending != "" && root.shown != root.pending;
+        triggered => { root.shown = root.pending; }
+    }
+    if root.shown != "": Rectangle {
+        property <length> w: min(label.preferred-width + 16px, 320px);
+        x: App.tip-above ? clamp(App.tip-x - self.w / 2, 4px, root.width - self.w - 4px) : App.tip-x;
+        y: max(4px, App.tip-above ? App.tip-y - self.height : App.tip-y - self.height / 2);
+        width: self.w;
+        height: 28px;
+        border-radius: Theme.radius-size-s;
+        background: Theme.background-color-primary-enabled-popover;
+        border-width: 1px;
+        border-color: Theme.outline-color-primary-disabled;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000040;
+        label := Text {
+            x: 8px;
+            width: parent.width - 16px;
+            text: root.shown;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: Theme.font-size-label-s;
+            font-weight: 500;
+            color: Theme.controls-color-primary-text-enabled-variant;
         }
     }
 }

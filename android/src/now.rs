@@ -20,6 +20,7 @@ struct State {
     synced: Vec<SyncLine>,
     artists: Vec<String>,
     liked_artists: HashSet<String>,
+    disliked_artists: HashSet<String>,
     similar: Vec<Track>,
     playlists: Vec<Playlist>,
 }
@@ -77,6 +78,7 @@ pub fn start(ui: &App, api: Arc<Api>, images: Images) {
             synced: Vec::new(),
             artists: Vec::new(),
             liked_artists: HashSet::new(),
+            disliked_artists: HashSet::new(),
             similar: Vec::new(),
             playlists: Vec::new(),
         })
@@ -94,13 +96,20 @@ pub fn set_uid(uid: &str) {
         let (api, uid) = (s.api.clone(), uid.to_string());
         std::thread::spawn(move || {
             let liked = api.liked_artists(&uid);
+            let disliked = api.disliked_artists(&uid);
             let _ = slint::invoke_from_event_loop(move || {
-                with(|s| match liked {
-                    Ok(a) => {
-                        s.liked_artists = a.into_iter().map(|a| a.id).collect();
-                        refresh_liked(s);
+                with(|s| {
+                    match liked {
+                        Ok(a) => {
+                            s.liked_artists = a.into_iter().map(|a| a.id).collect();
+                            refresh_liked(s);
+                        }
+                        Err(e) => log(format!("исполнители в коллекции: {e}")),
                     }
-                    Err(e) => log(format!("исполнители в коллекции: {e}")),
+                    match disliked {
+                        Ok(a) => s.disliked_artists = a.into_iter().map(|a| a.id).collect(),
+                        Err(e) => log(format!("дизлайки исполнителей: {e}")),
+                    }
                 });
             });
         });
@@ -255,12 +264,39 @@ pub fn toggle_artist(id: &str) -> bool {
         let remove = !s.liked_artists.insert(id.clone());
         if remove {
             s.liked_artists.remove(&id);
+        } else {
+            s.disliked_artists.remove(&id);
         }
         refresh_liked(s);
         let (api, uid) = (s.api.clone(), s.uid.clone());
         std::thread::spawn(move || {
             if let Err(e) = api.like_entity(&uid, "artists", &id, remove) {
                 log(format!("лайк исполнителя: {e}"));
+            }
+        });
+        !remove
+    })
+    .unwrap_or(false)
+}
+
+pub fn artist_disliked(id: &str) -> bool {
+    with(|s| s.disliked_artists.contains(id)).unwrap_or(false)
+}
+
+/// Дизлайк исполнителя по id; возвращает, стоит ли он теперь. Дизлайк снимает лайк.
+pub fn toggle_artist_dislike(id: &str) -> bool {
+    with(|s| {
+        let id = id.to_string();
+        let remove = !s.disliked_artists.insert(id.clone());
+        if remove {
+            s.disliked_artists.remove(&id);
+        } else if s.liked_artists.remove(&id) {
+            refresh_liked(s);
+        }
+        let (api, uid) = (s.api.clone(), s.uid.clone());
+        std::thread::spawn(move || {
+            if let Err(e) = api.dislike_artist(&uid, &id, remove) {
+                log(format!("дизлайк исполнителя: {e}"));
             }
         });
         !remove

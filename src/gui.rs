@@ -5,6 +5,7 @@ slint::include_modules!();
 mod history_ui;
 mod keys;
 mod landing_ui;
+mod track_about;
 
 use crate::save::{audio_ext, file_name_max};
 use crate::api::{album_kind_word, Album, Api, Card, Collection, Pin, Playlist, Track};
@@ -24,13 +25,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy)]
-struct EntityLike {
-    confirmed: bool,
-    desired: bool,
+struct EntityLike<T = bool> {
+    confirmed: T,
+    desired: T,
 }
 
-impl EntityLike {
-    fn complete(&mut self, sent: bool, success: bool) -> Option<bool> {
+impl<T: Copy + PartialEq> EntityLike<T> {
+    fn complete(&mut self, sent: T, success: bool) -> Option<T> {
         if success { self.confirmed = sent; }
         if self.desired == sent && !success { self.desired = self.confirmed; }
         (self.desired != self.confirmed).then_some(self.desired)
@@ -75,6 +76,31 @@ fn stale_snapshot_cannot_erase_confirmed_like_during_unlike() {
     assert_eq!(like.complete(false, false), None);
     assert!(like.desired);
 }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ArtistMark { Like, Dislike, Neutral }
+
+impl ArtistMark {
+    // При снятии реакции API выбирается по последнему подтверждённому состоянию.
+    fn request(self, previous: Self) -> (bool, bool) {
+        let remove = self == Self::Neutral;
+        let dislike = (if remove { previous } else { self }) == Self::Dislike;
+        (dislike, remove)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn artist_dislike_waits_for_the_like_and_restores_it_on_error() {
+    use ArtistMark::*;
+    let mut reaction = EntityLike { confirmed: Neutral, desired: Dislike };
+    assert_eq!(reaction.complete(Like, true), Some(Dislike));
+    assert_eq!(reaction.desired, Dislike);
+    assert_eq!(reaction.complete(Dislike, false), None);
+    assert_eq!(reaction.desired, Like);
+    assert_eq!(Neutral.request(Dislike), (true, true));
+    assert_eq!(Neutral.request(Like), (false, true));
+}
+
 const SEARCH_TRACK_KIND: &str = "track";
 
 struct ListDownload {
@@ -103,6 +129,10 @@ struct State {
     /// Пока пользователь ничего не включил, плеер показывается пустым — как в официальном приложении.
     started: bool,
     wheel: Vec<crate::api::WheelItem>,
+    /// Для какой волны загружено колесо; None — ещё не грузили.
+    wheel_seeds: Option<Vec<String>>,
+    /// Настройки «Моей волны», выбранные здесь (seeds `setting…`).
+    tune_seeds: Vec<String>,
     liked_albums: std::collections::HashSet<String>,
     liked_playlists: std::collections::HashSet<String>,
     /// «Смотреть всё»: ключ страницы, её вкладки и выбранная вкладка.
@@ -110,8 +140,12 @@ struct State {
     grid_titles: HashMap<String, String>,
     grid: Vec<(String, Vec<Card>)>,
     grid_tab: usize,
+    /// Лендинг по скелету («Жанры», «Эпохи»): id скелета.
+    landing_key: Option<String>,
     net: Option<Net>,
     pins: Vec<Pin>,
+    /// Когда закрепы последний раз сверялись с сервером: их могли поменять в другом клиенте.
+    pins_checked: Option<Instant>,
     playlists: Vec<Playlist>,
     albums: Vec<Album>,
     coll_shown: Option<Arc<Data>>,
@@ -137,6 +171,10 @@ struct State {
     artist_shown: Option<Arc<Data>>,
     artist_tracks: Vec<Track>,
     liked_artists: std::collections::HashSet<String>,
+    saved_artist_marks: HashMap<String, ArtistMark>,
+    pending_artist_marks: HashMap<String, EntityLike<ArtistMark>>,
+    /// None, пока список не пришёл с сервера.
+    disliked_artists: Option<std::collections::HashSet<String>>,
     menu_track: Option<Track>,
     /// Только что созданный плейлист: когда откроется, сразу править название.
     rename_key: Option<String>,
@@ -175,6 +213,18 @@ struct Trailer {
 const TRAILER_PART: f32 = 12.5;
 
 impl State {
+    fn remote_artist_mark(&self, id: &str) -> ArtistMark {
+        if self.liked_artists.contains(id) { ArtistMark::Like }
+        else if self.disliked_artists.as_ref().is_some_and(|ids| ids.contains(id)) { ArtistMark::Dislike }
+        else { ArtistMark::Neutral }
+    }
+
+    fn artist_mark(&self, id: &str) -> ArtistMark {
+        self.pending_artist_marks.get(id).map(|p| p.desired)
+            .or_else(|| self.saved_artist_marks.get(id).copied())
+            .unwrap_or_else(|| self.remote_artist_mark(id))
+    }
+
     fn download_stop(&self) -> Option<&AtomicBool> {
         self.list_shown.as_ref()?;
         self.download.as_ref()?.stop_for(&self.uid, self.list_key.as_deref())
@@ -241,6 +291,13 @@ fn mm_ss(ms: u64) -> String {
 }
 
 use crate::net::group_digits;
+
+/// В группе настроек волны ничего не выбрано (у «Под занятие» нет варианта «Любое»).
+const NOTHING: usize = usize::MAX;
+
+fn is_activity(seed: &str) -> bool {
+    seed.starts_with("activity:")
+}
 
 fn plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
     let (m10, m100) = (n % 10, n % 100);
@@ -396,6 +453,7 @@ impl Ctx {
         };
         app.set_source_title(source_title.into());
         app.set_wave_context(context);
+        self.sync_wheel(&s.source);
 
         app.set_can_prev(s.track.is_some());
         let playing_now = started && s.playing;
@@ -476,7 +534,6 @@ impl Ctx {
         std::thread::spawn(move || {
             let about = api.about();
             let pins = api.pins();
-            let wheel = api.wheel();
             let liked_albums = api.liked_album_ids(&uid);
             let artists = api.liked_artists(&uid);
             let liked_playlists = api.liked_playlist_keys(&uid);
@@ -506,7 +563,10 @@ impl Ctx {
                         Ok(p) => c.set_pins(p),
                         Err(e) => log(format!("pins: {e}")),
                     }
-                    if let Ok(artists) = artists { c.merge_entity_snapshot("artists", artists.into_iter().map(|a| a.id).collect()); }
+                    if let Ok(artists) = artists {
+                        c.st.borrow_mut().liked_artists = artists.into_iter().map(|a| a.id).collect();
+                        c.show_artist_mark();
+                    }
                     match liked_albums {
                         Ok(ids) => c.merge_entity_snapshot("albums", ids),
                         Err(e) => log(format!("понравившиеся альбомы: {e}")),
@@ -518,10 +578,6 @@ impl Ctx {
                     if let Some(on) = less_ai {
                         crate::api::LESS_AI.store(on, std::sync::atomic::Ordering::Relaxed);
                         app.set_less_ai(on);
-                    }
-                    match wheel {
-                        Ok(w) => c.set_wheel(w),
-                        Err(e) => log(format!("wheel: {e}")),
                     }
                 })
             });
@@ -536,6 +592,10 @@ impl Ctx {
     }
 
     fn set_pins(self: &Rc<Self>, pins: Vec<Pin>) {
+        // Без изменений не пересобираем: обложки мигнули бы.
+        if self.st.borrow().pins == pins {
+            return;
+        }
         let items: Vec<PinItem> = pins
             .iter()
             .map(|p| PinItem { title: p.title.clone().into(), subtitle: p.subtitle.clone().into(), cover: Image::default(), round: p.round })
@@ -564,6 +624,7 @@ impl Ctx {
         };
         let ui = self.ui();
         let app = ui.global::<App>();
+        self.check_pins();
         // Поле ввода старой страницы исчезает вместе с ней и о потере фокуса не сообщает.
         app.set_text_focused(false);
         let from = app.get_page();
@@ -585,6 +646,7 @@ impl Ctx {
         app.set_page(page);
         app.set_hint_open(false);
         app.set_cover_open(false);
+        app.set_overview_open(false);
         if from != page {
             self.release_page(from);
         }
@@ -612,6 +674,8 @@ impl Ctx {
                         app.set_list_desc(SharedString::new());
                         app.set_list_meta(SharedString::new());
                         app.set_list_cover(Image::default());
+                        app.set_list_label(SharedString::new());
+                        app.set_list_label_id(SharedString::new());
                     }
                 }
                 self.refresh_list();
@@ -651,6 +715,18 @@ impl Ctx {
             }
             Page::Artists => self.refresh_my_artists(),
             Page::Trends | Page::Concerts | Page::Nonmusic => self.refresh_landing(),
+            Page::Landing => {
+                // Другой лендинг: прежние блоки и заголовок не висят, пока грузится новый скелет.
+                let other = key.filter(|k| self.st.borrow().landing_key.as_ref() != Some(k));
+                if let Some(k) = &other {
+                    self.release_landing();
+                    self.st.borrow_mut().landing_key = Some(k.clone());
+                }
+                if other.is_some() || from != page {
+                    app.set_landing_title(SharedString::new());
+                }
+                self.refresh_landing();
+            }
             Page::Chart => self.refresh_chart(),
             #[cfg(all(windows, feature = "asio"))]
             Page::Settings => {
@@ -660,7 +736,10 @@ impl Ctx {
             Page::History => self.enter_history(),
             Page::Grid => {
                 if let Some(k) = key {
-                    self.st.borrow_mut().grid_key = Some(k);
+                    let previous = self.st.borrow_mut().grid_key.replace(k.clone());
+                    if previous.as_ref() != Some(&k) {
+                        app.set_grid_label_popular(false);
+                    }
                 }
                 self.refresh_grid();
             }
@@ -674,11 +753,18 @@ impl Ctx {
         let app = ui.global::<App>();
         let Some(key) = self.st.borrow().grid_key.clone() else { return };
         let title = self.st.borrow().grid_titles.get(&key).cloned().unwrap_or_default();
+        let label_overview = key.starts_with("label:");
+        let label_releases = key.starts_with("label-releases:");
+        let by_popularity = app.get_grid_label_popular();
         app.set_grid_title(title.into());
         app.set_grid_tabs(ModelRc::default());
         app.set_grid_count(0);
         app.set_grid_cards(ModelRc::default());
         app.set_grid_create(false);
+        app.set_grid_label(label_overview);
+        app.set_grid_label_sortable(label_releases);
+        app.set_grid_label_releases(ModelRc::default());
+        app.set_grid_label_artists(ModelRc::default());
         {
             let mut st = self.st.borrow_mut();
             st.grid.clear();
@@ -689,24 +775,51 @@ impl Ctx {
         std::thread::spawn(move || {
             let (block, arg) = key.split_once(':').unwrap_or((key.as_str(), ""));
             let one = |r: Result<Vec<Card>, String>| r.map(|c| vec![(String::new(), c)]);
+            // Заголовок подборки — название тега из ответа, как у TagPage оригинала.
+            let mut title = None;
             let res = match block {
+                "tag" => one(net.api.tag_playlists(arg).map(|(t, c)| {
+                    title = Some(t).filter(|t| !t.is_empty());
+                    c
+                })),
                 "playlists" => net.api.collection_tabs("playlists-liked-and-playlists-created"),
                 "albums" => net.api.collection_tabs("albums-liked-and-albums-presaved"),
+                "label" => (|| {
+                    Ok(vec![
+                        (String::new(), net.api.label_albums(arg, 12, false)?),
+                        (String::new(), net.api.label_artists(arg, 12)?),
+                    ])
+                })(),
+                "label-releases" => one(net.api.label_albums(arg, 100, by_popularity)),
+                "label-artists" => one(net.api.label_artists(arg, 100)),
                 // Как у оригинала: «Студийные альбомы» ведут на discography-albums, а не на все альбомы.
                 "ar-studio" => one(net.api.artist_albums(arg, "discography-albums")),
                 "ar-albums" => one(net.api.artist_albums(arg, "direct-albums")),
                 "ar-compilations" => one(net.api.artist_albums(arg, "also-albums")),
                 "ar-similar" => one(net.api.similar_artists(arg)),
                 "entities" => one(net.api.block_entities(arg)),
+                "disliked-artists" => one(net.api.disliked_artists(&net.uid).map(|list| list.iter().map(crate::api::artist_card).collect())),
                 _ => Ok(vec![(String::new(), cached)]),
             };
             let _ = slint::invoke_from_event_loop(move || {
                 with_ctx(|c| {
-                    if !c.same_session(&net) || c.ui().global::<App>().get_page() != Page::Grid || c.st.borrow().grid_key.as_deref() != Some(key.as_str()) {
+                    let ui = c.ui();
+                    let app = ui.global::<App>();
+                    if !c.same_session(&net) || app.get_page() != Page::Grid || c.st.borrow().grid_key.as_deref() != Some(key.as_str())
+                        || (label_releases && app.get_grid_label_popular() != by_popularity) {
                         return;
                     }
                     match res {
+                        Ok(tabs) if label_overview => {
+                            let mut cards = tabs.into_iter().map(|(_, cards)| cards);
+                            app.set_grid_label_releases(c.card_model("label-releases", &cards.next().unwrap_or_default(), 191.0));
+                            app.set_grid_label_artists(c.card_model("label-artists", &cards.next().unwrap_or_default(), 191.0));
+                        }
                         Ok(tabs) => {
+                            if let Some(t) = title {
+                                c.ui().global::<App>().set_grid_title(t.as_str().into());
+                                c.st.borrow_mut().grid_titles.insert(key.clone(), t);
+                            }
                             c.st.borrow_mut().grid = tabs;
                             c.show_grid_tab();
                         }
@@ -823,7 +936,7 @@ impl Ctx {
             }
             Page::Artist => self.refresh_artist(),
             Page::Artists => self.show_my_top(),
-            Page::Trends | Page::Concerts | Page::Nonmusic => self.refresh_landing(),
+            Page::Trends | Page::Concerts | Page::Nonmusic | Page::Landing => self.refresh_landing(),
             Page::Chart => self.refresh_chart(),
             Page::History => self.refresh_history(),
             _ => {}
@@ -1040,6 +1153,7 @@ impl Ctx {
         app.set_list_year(SharedString::new());
         app.set_list_likes(SharedString::new());
         app.set_list_label(SharedString::new());
+        app.set_list_label_id(SharedString::new());
         app.set_list_own(false);
         app.set_list_artist_cover(Image::default());
         app.set_list_tint(Color::from_argb_u8(0, 0, 0, 0));
@@ -1068,6 +1182,7 @@ impl Ctx {
                 app.set_list_year(a.and_then(|a| a.year).map(|y| y.to_string()).unwrap_or_default().into());
                 app.set_list_likes(a.map(|a| group_digits(a.likes)).unwrap_or_default().into());
                 app.set_list_label(a.map(|a| a.label.clone()).unwrap_or_default().into());
+                app.set_list_label_id(a.and_then(|a| a.label_id).map(|id| id.to_string()).unwrap_or_default().into());
                 app.set_list_liked(a.is_some_and(|a| self.st.borrow().liked_albums.contains(&a.id)));
                 if let Some(c) = l.tracks.first().and_then(|t| t.color) {
                     app.set_list_tint(soft(c));
@@ -1267,12 +1382,15 @@ impl Ctx {
         if let Some(ui) = self.ui.upgrade() {
             ui.global::<App>().set_wave_settings_open(true);
         }
+        let activity = self.player.state().source.station().filter(|s| s.starts_with("activity:")).map(String::from);
         std::thread::spawn(move || {
             let groups = net.api.wave_setting_groups();
-            let current = net.api.wave_settings();
+            let mut current = net.api.wave_settings();
+            current.extend(activity);
             let _ = slint::invoke_from_event_loop(move || {
                 with_ctx(|c| match groups {
-                    Ok(groups) => c.set_wave_settings(groups, &current),
+                    Ok(groups) if c.same_session(&net) => c.set_wave_settings(groups, &current),
+                    Ok(_) => {}
                     Err(e) => log(format!("rotor/wave/settings: {e}")),
                 })
             });
@@ -1283,12 +1401,13 @@ impl Ctx {
         let tune: Vec<_> = groups
             .into_iter()
             .map(|g| {
+                let activities = g.options.iter().any(|o| is_activity(&o.seed));
                 let chosen = g
                     .options
                     .iter()
                     .position(|o| current.contains(&o.seed))
                     .or_else(|| g.options.iter().position(|o| o.any))
-                    .unwrap_or(0);
+                    .unwrap_or(if activities { NOTHING } else { 0 });
                 let images = vec![Image::default(); g.options.len()];
                 (g, chosen, images)
             })
@@ -1301,11 +1420,14 @@ impl Ctx {
         self.st.borrow_mut().wave_tune = tune;
         self.show_wave_settings();
         for (gi, oi, url) in urls {
+            let expected = url.clone();
             self.images.get(&url, 48, move |img| {
                 with_ctx(|c| {
-                    if let Some(slot) = c.st.borrow_mut().wave_tune.get_mut(gi).and_then(|e| e.2.get_mut(oi)) {
-                        *slot = img.clone();
-                    }
+                    let mut st = c.st.borrow_mut();
+                    let Some((group, _, images)) = st.wave_tune.get_mut(gi) else { return };
+                    if group.options.get(oi).and_then(|o| o.image.as_ref()) != Some(&expected) { return; }
+                    images[oi] = img.clone();
+                    drop(st);
                     c.show_wave_settings();
                 })
             });
@@ -1362,8 +1484,33 @@ impl Ctx {
         self.st.borrow_mut().wheel = items;
     }
 
+    /// Колесо зависит от играющей волны: сменилась волна — спросить его заново.
+    fn sync_wheel(self: &Rc<Self>, source: &Source) {
+        let seeds = match source {
+            Source::Wave => std::iter::once(crate::api::WAVE.to_string()).chain(self.st.borrow().tune_seeds.iter().cloned()).collect(),
+            Source::Seed { station, .. } => vec![station.clone()],
+            Source::List { .. } => Vec::new(),
+        };
+        let Some(net) = self.st.borrow().net.clone() else { return };
+        if self.st.borrow().wheel_seeds.as_ref() == Some(&seeds) {
+            return;
+        }
+        self.st.borrow_mut().wheel_seeds = Some(seeds.clone());
+        std::thread::spawn(move || {
+            let wheel = net.api.wheel(&seeds);
+            let _ = slint::invoke_from_event_loop(move || {
+                with_ctx(|c| match wheel {
+                    Ok(w) if c.same_session(&net) && c.st.borrow().wheel_seeds.as_ref() == Some(&seeds) => c.set_wheel(w),
+                    Ok(_) => {}
+                    Err(e) => log(format!("wheel: {e}")),
+                })
+            });
+        });
+    }
+
     fn play_wheel(self: &Rc<Self>, i: usize) {
         let Some(w) = self.st.borrow().wheel.get(i).cloned() else { return };
+        self.st.borrow_mut().tune_seeds.clear();
         let source = match w.station() {
             Some(station) => Source::Seed { station, header: "Моя волна".into(), title: w.name.clone() },
             None => Source::Wave,
@@ -1667,6 +1814,46 @@ thread_local! {
     static UPDATE: RefCell<Option<crate::update::Release>> = const { RefCell::new(None) };
 }
 
+/// Спросить GitHub (долго, звать из фонового потока) и показать итог: новый релиз — тост
+/// «Доступна версия …», в настройках под «Проверить обновления» — что вышло и когда (#128).
+fn check_updates(weak: &slint::Weak<AppWindow>) {
+    let res = crate::update::check();
+    if let Err(e) = &res {
+        log(format!("обновления: {e}"));
+    }
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        let app = ui.global::<App>();
+        let time = chrono::Local::now().format("%H:%M");
+        app.set_update_failed(res.is_err());
+        let status = match res {
+            Ok(Some(r)) => {
+                app.set_update_version(r.version.clone().into());
+                let status = format!("Проверено в {time}: доступна версия {}", r.version);
+                UPDATE.with(|u| *u.borrow_mut() = Some(r));
+                status
+            }
+            Ok(None) => format!("Проверено в {time}: новых версий нет"),
+            Err(e) => format!("Ошибка в {time}: {e}"),
+        };
+        app.set_update_status(status.into());
+    });
+}
+
+/// «Проверить обновления» в настройках и в трее: спросить сейчас, даже если фоновая проверка
+/// выключена. У оригинала пункт трея (`desktop.check-for-updates`) так же зовёт `updater.check()`.
+fn check_updates_now(ui: &AppWindow) {
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    if BUSY.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    ui.global::<App>().set_update_status("Проверяем…".into());
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        check_updates(&weak);
+        BUSY.store(false, Ordering::Relaxed);
+    });
+}
+
 /// Проверка обновлений в фоне (первая — через 10 с после запуска) и кнопка «Обновить» в тосте.
 fn start_updates(ui: &AppWindow) {
     let weak = ui.as_weak();
@@ -1677,20 +1864,9 @@ fn start_updates(ui: &AppWindow) {
                 std::thread::sleep(Duration::from_secs(60));
                 continue;
             }
-            match crate::update::check() {
-                Ok(Some(r)) => {
-                    let weak = weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.global::<App>().set_update_version(r.version.clone().into());
-                            UPDATE.with(|u| *u.borrow_mut() = Some(r));
-                        }
-                    });
-                }
-                Ok(None) => {}
-                Err(e) => log(format!("обновления: {e}")),
-            }
-            std::thread::sleep(crate::update::POLL);
+            check_updates(&weak);
+            // После отказа по лимиту запросов — когда разрешит GitHub, а не через полчаса.
+            std::thread::sleep(crate::update::next_check());
         }
     });
     ui.global::<App>().on_update_changes(|| {
@@ -1859,6 +2035,7 @@ fn set_icons(ui: &AppWindow, sprite: &Sprite) {
     icons.set_m_disliked(get("disliked_xxs"));
     icons.set_m_add_playlist(get("addToPlaylist_xxs"));
     icons.set_m_lyrics(get("lyrics_xxs"));
+    icons.set_m_queue(get("playQueue_xxs"));
     icons.set_m_share(get("share_xxs"));
     icons.set_m_pin(get("pin_xxs"));
     icons.set_m_unpin(get("unpin_xxs"));
@@ -2045,14 +2222,18 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             uid: String::new(),
             started: false,
             wheel: Vec::new(),
+            wheel_seeds: None,
+            tune_seeds: Vec::new(),
             liked_albums: Default::default(),
             liked_playlists: Default::default(),
             grid_key: None,
+            landing_key: None,
             grid_titles: HashMap::new(),
             grid: Vec::new(),
             grid_tab: 0,
             net: None,
             pins: Vec::new(),
+            pins_checked: None,
             playlists: Vec::new(),
             albums: Vec::new(),
             coll_shown: None,
@@ -2078,6 +2259,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             artist_shown: None,
             artist_tracks: Vec::new(),
             liked_artists: Default::default(),
+            saved_artist_marks: Default::default(),
+            pending_artist_marks: Default::default(),
+            disliked_artists: None,
             menu_track: None,
             rename_key: None,
             menu_playlists: Vec::new(),
@@ -2270,6 +2454,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     register_extra(&app);
     landing_ui::register(&app);
     history_ui::register(&app);
+    track_about::register(&app);
     landing_ui::load_concert_assets(&app);
 
     let weak = ui.as_weak();
@@ -2617,7 +2802,7 @@ fn install_tray(ui: &AppWindow, player: &Player) {
                 Event::Pause => p.send(Cmd::Pause),
                 Event::Prev => p.send(Cmd::Prev),
                 Event::Next => p.send(Cmd::Next),
-                Event::Updates => sys::open_url(concat!(env!("CARGO_PKG_REPOSITORY"), "/releases")),
+                Event::Updates => check_updates_now(&ui),
                 Event::Terms => sys::open_url("https://yandex.ru/legal/music_mobile_agreement/"),
                 Event::Recommendations => sys::open_url("https://music.yandex.ru/legal/recommendations/ru/#music"),
                 Event::Support => sys::open_url(SUPPORT_CHAT),
@@ -2906,7 +3091,14 @@ impl Ctx {
             st.uid.clear();
             st.pins.clear();
             st.wheel.clear();
+            st.wheel_seeds = None;
+            st.tune_seeds.clear();
+            st.wave_tune.clear();
+            st.pending_artist_marks.clear();
+            st.saved_artist_marks.clear();
             st.liked_artists.clear();
+            st.disliked_artists = None;
+            st.pins_checked = None;
             st.liked_albums.clear();
             st.liked_playlists.clear();
             st.cards.clear();
@@ -2924,6 +3116,8 @@ impl Ctx {
         app.set_avatar(Image::default());
         app.set_pins(ModelRc::default());
         app.set_wheel(ModelRc::default());
+        app.set_wave_settings(ModelRc::default());
+        app.set_wave_settings_open(false);
         app.set_my_artists(ModelRc::default());
         app.set_fullscreen(false);
         self.navigate(Page::Wave, None, false);
@@ -2931,7 +3125,7 @@ impl Ctx {
     }
 
     fn menu_entry(&self, id: &str, text: &str, icon: Image, submenu: bool) -> MenuEntry {
-        MenuEntry { id: id.into(), text: crate::i18n::tr(text).into(), icon, submenu }
+        MenuEntry { id: id.into(), text: crate::i18n::tr(text).into(), icon, submenu, checked: false }
     }
 
     // ---------- карточки ----------
@@ -2957,17 +3151,16 @@ impl Ctx {
     }
 
     fn open_target(self: &Rc<Self>, target: &str, title: &str) {
-        let (kind, _) = target.split_once(':').unwrap_or(("", ""));
+        let (kind, arg) = target.split_once(':').unwrap_or(("", ""));
         match kind {
             "album" | "playlist" => self.navigate(Page::List, Some(target.to_string()), true),
             "artist" => self.navigate(Page::Artist, Some(target.to_string()), true),
+            // Подборка — сетка её плейлистов; заголовок, пока грузится, — с карточки.
             "tag" => {
-                let ui = self.ui();
-                let app = ui.global::<App>();
-                app.set_search_text(title.into());
-                self.navigate(Page::Search, None, true);
-                self.search_now(title.to_string());
+                self.st.borrow_mut().grid_titles.insert(target.to_string(), title.to_string());
+                self.navigate(Page::Grid, Some(target.to_string()), true);
             }
+            "landing" => self.navigate(Page::Landing, Some(arg.to_string()), true),
             _ => {}
         }
     }
@@ -2975,6 +3168,7 @@ impl Ctx {
     fn open_card(self: &Rc<Self>, block: &str, i: usize) {
         match block {
             "chart" => return self.navigate(Page::Chart, None, true),
+            "dislikes" => return self.navigate(Page::List, Some("dislikes".into()), true),
             "artist-tracks" => {
                 if let Some((id, _)) = self.current_artist() {
                     self.navigate(Page::List, Some(format!("artist-tracks:{id}")), true);
@@ -3145,7 +3339,8 @@ impl Ctx {
                 app.set_ar_name(a.name.clone().into());
                 app.set_ar_listeners(a.listeners.map(crate::net::listeners_word).unwrap_or_default().into());
                 app.set_ar_tint(a.color.map(|c| Color::from_argb_u8(178, c[0], c[1], c[2])).unwrap_or(Color::from_argb_u8(0, 0, 0, 0)));
-                app.set_ar_liked(self.st.borrow().liked_artists.contains(&a.id));
+                app.set_ar_liked(self.st.borrow().artist_mark(&a.id) == ArtistMark::Like);
+                self.load_disliked_artists();
                 app.set_ar_pinned(self.st.borrow().pins.iter().any(|p| p.target == key));
                 app.set_ar_popular(self.track_model(&a.popular));
                 let fam = if a.familiar_tracks > 0 {
@@ -3240,6 +3435,7 @@ impl Ctx {
                 self.menu_entry("dislike", "Не нравится", icons.get_m_dislike(), false)
             };
             items.push(entry);
+            items.push(self.menu_entry("queue", "Открыть очередь", icons.get_m_queue(), false));
         }
         items.push(self.menu_entry("playlist", "Добавить в плейлист", icons.get_m_add_playlist(), true));
         if t.lyrics && current {
@@ -3252,7 +3448,9 @@ impl Ctx {
         if !t.artist_list.is_empty() {
             items.push(self.menu_entry("artist", "Перейти к исполнителю", icons.get_m_artist(), false));
         }
-        items.push(self.menu_entry("info", "О треке", icons.get_m_info(), false));
+        // Заголовок по типу (`track-modal.*-title`): глава, выпуск или трек.
+        let about = if t.is_chapter() { "О главе" } else if t.is_episode() { "О выпуске" } else { "О треке" };
+        items.push(self.menu_entry("info", about, icons.get_m_info(), false));
         items.push(self.menu_entry("complain", "Сообщить о проблеме", icons.get_m_complain(), false));
         self.st.borrow_mut().menu_track = Some(t);
         self.show_menu(items, x, y, below);
@@ -3387,6 +3585,8 @@ impl Ctx {
                 self.toast("Скрытые блоки снова на главной");
             }
             "about" => sys::open_url(env!("CARGO_PKG_REPOSITORY")),
+            "update-check" => check_updates_now(&ui),
+            "releases" => sys::open_url(concat!(env!("CARGO_PKG_REPOSITORY"), "/releases")),
             "donate" => sys::open_url(DONATE_URL),
             "discord" => {
                 let on = !app.get_discord_on();
@@ -3564,6 +3764,18 @@ impl Ctx {
         });
     }
 
+    /// При переходах по разделам, но не чаще раза в минуту.
+    fn check_pins(&self) {
+        let Some(net) = self.st.borrow().net.clone() else { return };
+        let now = Instant::now();
+        let due = self.st.borrow().pins_checked.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(60));
+        if !due {
+            return;
+        }
+        self.st.borrow_mut().pins_checked = Some(now);
+        std::thread::spawn(move || Self::reload_pins(&net));
+    }
+
     fn reload_pins(net: &Net) {
         if let Ok(p) = net.api.pins() {
             let session = net.clone();
@@ -3650,8 +3862,7 @@ impl Ctx {
             let mut st = self.st.borrow_mut();
             let had = match kind {
                 "albums" => st.liked_albums.contains(&key),
-                "playlists" => st.liked_playlists.contains(&key),
-                _ => st.liked_artists.contains(&key),
+                _ => st.liked_playlists.contains(&key),
             };
             let entry = st.entity_likes.entry((kind, id.clone()));
             let start = matches!(entry, std::collections::hash_map::Entry::Vacant(_));
@@ -3670,19 +3881,17 @@ impl Ctx {
         merge_entity_likes(kind, &mut fresh, saved_entities, entity_likes);
         let selected = match kind {
             "albums" => st.list_key.as_deref().and_then(|k| k.strip_prefix("album:")),
-            "playlists" => st.list_key.as_deref().filter(|k| k.starts_with("playlist:")),
-            _ => st.artist_key.as_deref().map(|k| k.strip_prefix("artist:").unwrap_or(k)),
+            _ => st.list_key.as_deref().filter(|k| k.starts_with("playlist:")),
         }.map(|key| fresh.contains(key));
         match kind {
             "albums" => st.liked_albums = fresh,
-            "playlists" => st.liked_playlists = fresh,
-            _ => st.liked_artists = fresh,
+            _ => st.liked_playlists = fresh,
         }
         drop(st);
         if let Some(liked) = selected {
             let ui = self.ui();
             let app = ui.global::<App>();
-            if kind == "artists" { app.set_ar_liked(liked); } else { app.set_list_liked(liked); }
+            app.set_list_liked(liked);
         }
     }
 
@@ -3690,27 +3899,25 @@ impl Ctx {
         let mut st = self.st.borrow_mut();
         let set = match kind {
             "albums" => &mut st.liked_albums,
-            "playlists" => &mut st.liked_playlists,
-            _ => &mut st.liked_artists,
+            _ => &mut st.liked_playlists,
         };
         if liked { set.insert(key.into()); } else { set.remove(key); }
         let visible = match kind {
             "albums" => st.list_key.as_deref().and_then(|k| k.strip_prefix("album:")) == Some(key),
-            "playlists" => st.list_key.as_deref() == Some(key),
-            _ => st.artist_key.as_deref().and_then(|k| k.strip_prefix("artist:")).unwrap_or_default() == key
-                || st.artist_key.as_deref() == Some(key),
+            _ => st.list_key.as_deref() == Some(key),
         };
         drop(st);
         if visible {
             let ui = self.ui();
             let app = ui.global::<App>();
-            if kind == "artists" { app.set_ar_liked(liked); } else { app.set_list_liked(liked); }
+            app.set_list_liked(liked);
         }
     }
 
     fn save_entity_like(net: Net, kind: &'static str, id: String, key: String, title: String, sent: bool) {
         std::thread::spawn(move || {
             let result = net.api.like_entity(&net.uid, kind, &id, !sent);
+            if result.is_ok() && kind == "albums" { net.refresh("collection"); }
             let _ = slint::invoke_from_event_loop(move || with_ctx(|c| {
                 let mut st = c.st.borrow_mut();
                 if !st.net.as_ref().is_some_and(|active| Arc::ptr_eq(&active.toast, &net.toast)) { return; }
@@ -3755,8 +3962,14 @@ impl Ctx {
     fn open_artist_menu(self: &Rc<Self>, x: f32, y: f32) {
         let ui = self.ui();
         let icons = ui.global::<Icons>();
+        let disliked = self.current_artist().is_some_and(|(id, _)| self.st.borrow().artist_mark(&id) == ArtistMark::Dislike);
         let items = vec![
             self.menu_entry("artist-vibe", "Моя волна по исполнителю", icons.get_m_vibe(), false),
+            if disliked {
+                self.menu_entry("artist-dislike", "Убрать из «Не нравится»", icons.get_m_disliked(), false)
+            } else {
+                self.menu_entry("artist-dislike", "Не нравится", icons.get_m_dislike(), false)
+            },
             self.menu_entry("artist-share", "Поделиться", icons.get_m_share(), false),
         ];
         self.show_menu(items, x, y, false);
@@ -3779,6 +3992,73 @@ impl Ctx {
             _ => return,
         }
         app.set_submenu_open(submenu);
+    }
+
+    fn load_disliked_artists(self: &Rc<Self>) {
+        if self.st.borrow().disliked_artists.is_some() {
+            return;
+        }
+        let Some(net) = self.st.borrow().net.clone() else { return };
+        let uid = self.st.borrow().uid.clone();
+        std::thread::spawn(move || {
+            let Ok(list) = net.api.disliked_artists(&uid) else { return };
+            let ids = list.into_iter().map(|a| a.id).collect();
+            let _ = slint::invoke_from_event_loop(move || with_ctx(|c| {
+                if c.same_session(&net) { c.st.borrow_mut().disliked_artists = Some(ids); }
+            }));
+        });
+    }
+
+    fn show_artist_mark(&self) {
+        if let Some((id, _)) = self.current_artist() {
+            self.ui().global::<App>().set_ar_liked(self.st.borrow().artist_mark(&id) == ArtistMark::Like);
+        }
+    }
+
+    fn toggle_artist_mark(&self, id: String, name: String, button: ArtistMark) {
+        let Some(net) = self.st.borrow().net.clone() else { return };
+        let mut st = self.st.borrow_mut();
+        let old = st.artist_mark(&id);
+        let desired = if old == button { ArtistMark::Neutral } else { button };
+        let entry = st.pending_artist_marks.entry(id.clone());
+        let start = matches!(entry, std::collections::hash_map::Entry::Vacant(_));
+        entry.or_insert(EntityLike { confirmed: old, desired }).desired = desired;
+        drop(st);
+        self.show_artist_mark();
+        if start { Self::save_artist_mark(net, id, name, old, desired); }
+    }
+
+    fn save_artist_mark(net: Net, id: String, name: String, previous: ArtistMark, sent: ArtistMark) {
+        std::thread::spawn(move || {
+            let (dislike, remove) = sent.request(previous);
+            let result = if dislike { net.api.dislike_artist(&net.uid, &id, remove) }
+                else { net.api.like_entity(&net.uid, "artists", &id, remove) };
+            let _ = slint::invoke_from_event_loop(move || with_ctx(|c| {
+                if !c.same_session(&net) { return; }
+                let mut st = c.st.borrow_mut();
+                if result.is_ok() { st.saved_artist_marks.insert(id.clone(), sent); }
+                let saved = st.saved_artist_marks.get(&id).copied().unwrap_or_else(|| st.remote_artist_mark(&id));
+                let Some(pending) = st.pending_artist_marks.get_mut(&id) else { return };
+                pending.confirmed = saved;
+                let next = pending.complete(sent, result.is_ok());
+                if next.is_none() { st.pending_artist_marks.remove(&id); }
+                drop(st);
+                c.show_artist_mark();
+                if let Some(next) = next {
+                    Self::save_artist_mark(net, id, name, saved, next);
+                } else {
+                    net.say(match result {
+                        Err(e) => format!("Не удалось сохранить: {e}"),
+                        Ok(()) => match (sent, dislike) {
+                            (ArtistMark::Like, _) => format!("«{name}» в коллекции"),
+                            (ArtistMark::Dislike, _) => format!("{name}: не нравится"),
+                            (ArtistMark::Neutral, true) => format!("{name} убран из «Не нравится»"),
+                            (ArtistMark::Neutral, false) => format!("«{name}» удалён из коллекции"),
+                        },
+                    });
+                }
+            }));
+        });
     }
 
     fn show_menu(&self, items: Vec<MenuEntry>, x: f32, y: f32, below: bool) {
@@ -3834,6 +4114,17 @@ impl Ctx {
     }
 
     fn menu_action(self: &Rc<Self>, id: &str) {
+        if matches!(id, "label-sort-popular" | "label-sort-date") {
+            let ui = self.ui();
+            let app = ui.global::<App>();
+            let by_popularity = id == "label-sort-popular";
+            if app.get_page() == Page::Grid && app.get_grid_label_sortable()
+                && app.get_grid_label_popular() != by_popularity {
+                app.set_grid_label_popular(by_popularity);
+                self.refresh_grid();
+            }
+            return;
+        }
         if let Some(target) = id.strip_prefix("unpin:") {
             if self.is_pinned(target) { self.toggle_pin(target.to_owned()); }
             return;
@@ -3845,6 +4136,7 @@ impl Ctx {
                     self.player.send(Cmd::Wave(Source::Seed { station: format!("artist:{aid}"), header: "Моя волна по исполнителю".into(), title: name }));
                     self.start();
                 }
+                "dislike" => self.toggle_artist_mark(aid, name, ArtistMark::Dislike),
                 "share" => {
                     sys::copy_text(&format!("https://music.yandex.ru/artist/{aid}"));
                     self.toast("Ссылка скопирована");
@@ -3927,6 +4219,7 @@ impl Ctx {
             }
             "dislike" => self.dislike(),
             "lyrics" => self.open_fullscreen(2),
+            "queue" => self.open_fullscreen(1),
             "share-link" => {
                 sys::copy_text(&track_link(&t));
                 self.toast("Ссылка скопирована");
@@ -3955,7 +4248,7 @@ impl Ctx {
                     self.navigate(Page::Artist, Some(format!("artist:{}", a.id)), true);
                 }
             }
-            "info" => self.toast(format!("{} — {} · {}", t.artists, t.title, mmss(t.duration_ms as f32 / 1000.0))),
+            "info" => self.open_track_about(t),
             "complain" => sys::open_url("https://yandex.ru/support/music/"),
             _ => {}
         }
@@ -4004,6 +4297,7 @@ impl Ctx {
         app.set_fs_mode(mode);
         app.set_fullscreen(true);
         app.set_menu_open(false);
+        app.set_eq_open(false);
         self.load_cover_big();
         self.sync_lyrics();
     }
@@ -4249,7 +4543,17 @@ impl Ctx {
         app.set_eq_on(c.eq_on);
         app.set_eq_preamp(c.eq_preamp);
         app.set_eq_preset(c.eq_preset.min(crate::eq::PRESETS.len() - 1) as i32);
-        app.set_eq_gains(ModelRc::from(Rc::new(VecModel::from(c.eq_gains.to_vec()))));
+        let gains = app.get_eq_gains();
+        if gains.row_count() == c.eq_gains.len() {
+            // Замена модели пересоздаёт ползунки и прерывает захват указателя.
+            for (i, &gain) in c.eq_gains.iter().enumerate() {
+                if gains.row_data(i) != Some(gain) {
+                    gains.set_row_data(i, gain);
+                }
+            }
+        } else {
+            app.set_eq_gains(ModelRc::from(Rc::new(VecModel::from(c.eq_gains.to_vec()))));
+        }
         app.set_quality(c.quality as i32);
         crate::api::QUALITY.store(c.quality, std::sync::atomic::Ordering::Relaxed);
         c.save();
@@ -4266,6 +4570,7 @@ impl Ctx {
             Page::Artist => (Page::Artist, st.artist_key.clone()),
             Page::List => (Page::List, st.list_key.clone()),
             Page::Grid => (Page::Grid, st.grid_key.clone()),
+            Page::Landing => (Page::Landing, st.landing_key.clone()),
             Page::Search if app.get_search_tracks_only() => (Page::Search, Some(SEARCH_TRACK_KIND.into())),
             p => (p, None),
         }
@@ -4313,7 +4618,11 @@ impl Ctx {
             }
             Page::Grid => {
                 st.grid.clear();
+                st.cards.remove("label-releases");
+                st.cards.remove("label-artists");
                 drop(st);
+                app.set_grid_label_releases(ModelRc::default());
+                app.set_grid_label_artists(ModelRc::default());
                 self.images.cancel_pending();
                 app.set_grid_count(0);
                 app.set_grid_cards(ModelRc::default());
@@ -4337,7 +4646,7 @@ impl Ctx {
                 app.set_playlists(ModelRc::default());
                 app.set_albums(ModelRc::default());
             }
-            Page::Trends | Page::Concerts | Page::Nonmusic => {
+            Page::Trends | Page::Concerts | Page::Nonmusic | Page::Landing => {
                 drop(st);
                 self.release_landing();
             }
@@ -4380,7 +4689,8 @@ impl Ctx {
     fn dislike(self: &Rc<Self>) {
         let net = self.st.borrow().net.clone();
         self.player.send(Cmd::Dislike(Some(Box::new(move |track, added, result| {
-            if let Some(net) = net.filter(|_| added && result.is_ok()) { net.dislike_saved(track); }
+            let Some(net) = net.filter(|_| result.is_ok()) else { return };
+            if added { net.dislike_saved(track) } else { net.forget("dislikes") }
         }))));
     }
 
@@ -4831,6 +5141,17 @@ fn register_extra(app: &App) {
     app.on_setting(|id| with_ctx(|c| c.setting(&id)));
     app.on_open_grid(|block, title| {
         with_ctx(|c| {
+            if matches!(block.as_str(), "label-releases" | "label-artists") {
+                let key = {
+                    let st = c.st.borrow();
+                    let Some(id) = st.grid_key.as_deref().and_then(|key| key.strip_prefix("label:")) else { return };
+                    format!("{block}:{id}")
+                };
+                let label = c.ui().global::<App>().get_grid_title();
+                c.st.borrow_mut().grid_titles.insert(key.clone(), format!("{title} {label}"));
+                c.navigate(Page::Grid, Some(key), true);
+                return;
+            }
             // Полки исполнителя запоминают его id: страница должна открываться и из истории.
             let key = match c.current_artist() {
                 Some((id, _)) if block.starts_with("ar-") => format!("{block}:{id}"),
@@ -4839,6 +5160,29 @@ fn register_extra(app: &App) {
             c.st.borrow_mut().grid_titles.insert(key.clone(), title.to_string());
             c.navigate(Page::Grid, Some(key), true);
         })
+    });
+    app.on_share_label(|| {
+        with_ctx(|c| {
+            let url = {
+                let st = c.st.borrow();
+                let Some(id) = st.grid_key.as_deref().and_then(|key| key.strip_prefix("label:")) else { return };
+                format!("https://music.yandex.ru/label/{id}")
+            };
+            sys::copy_text(&url);
+            c.toast("Ссылка скопирована");
+        });
+    });
+    app.on_open_label_sort(|x, y| {
+        with_ctx(|c| {
+            let ui = c.ui();
+            let app = ui.global::<App>();
+            let by_popularity = app.get_grid_label_popular();
+            let mut popular = c.menu_entry("label-sort-popular", "По популярности", Image::default(), false);
+            popular.checked = by_popularity;
+            let mut date = c.menu_entry("label-sort-date", "По дате выхода", Image::default(), false);
+            date.checked = !by_popularity;
+            c.show_menu(vec![popular, date], x, y, true);
+        });
     });
     app.on_select_grid_tab(|i| {
         with_ctx(|c| {
@@ -5017,7 +5361,7 @@ fn register_extra(app: &App) {
     app.on_artist_like(|| {
         with_ctx(|c| {
             let Some((id, name)) = c.current_artist() else { return };
-            c.toggle_entity_like("artists", id, name);
+            c.toggle_artist_mark(id, name, ArtistMark::Like);
         })
     });
     app.on_artist_pin(|| {
@@ -5050,11 +5394,14 @@ fn register_extra(app: &App) {
     });
     app.on_eq_set_band(|i, v| {
         with_ctx(|c| {
+            let gain = (v * 2.0).round() / 2.0;
             {
                 let mut st = c.st.borrow_mut();
-                if let Some(g) = st.cfg.eq_gains.get_mut(i.max(0) as usize) {
-                    *g = (v * 2.0).round() / 2.0;
+                let Some(g) = st.cfg.eq_gains.get_mut(i.max(0) as usize) else { return };
+                if *g == gain {
+                    return;
                 }
+                *g = gain;
                 st.cfg.eq_preset = 0;
             }
             c.apply_eq();
@@ -5062,7 +5409,11 @@ fn register_extra(app: &App) {
     });
     app.on_eq_set_preamp(|v| {
         with_ctx(|c| {
-            c.st.borrow_mut().cfg.eq_preamp = (v * 20.0).round() / 20.0;
+            let gain = (v * 20.0).round() / 20.0;
+            if c.st.borrow().cfg.eq_preamp == gain {
+                return;
+            }
+            c.st.borrow_mut().cfg.eq_preamp = gain;
             c.apply_eq();
         })
     });
@@ -5083,26 +5434,49 @@ fn register_extra(app: &App) {
     app.on_open_wave_settings(|| with_ctx(|c| c.open_wave_settings()));
     app.on_tune_wave(|group, option| {
         with_ctx(|c| {
-            let settings = {
+            let (settings, activity) = {
                 let mut st = c.st.borrow_mut();
                 let Some(entry) = st.wave_tune.get_mut(group.max(0) as usize) else { return };
-                entry.1 = (option.max(0) as usize).min(entry.0.options.len().saturating_sub(1));
-                st.wave_tune
+                let option = (option.max(0) as usize).min(entry.0.options.len().saturating_sub(1));
+                let picked = entry.0.options[option].clone();
+                // Занятие — отдельная волна: повторное нажатие возвращает к настроенной «Моей волне».
+                let activity = if is_activity(&picked.seed) {
+                    entry.1 = if entry.1 == option { NOTHING } else { option };
+                    (entry.1 == option).then_some(picked)
+                } else {
+                    entry.1 = option;
+                    for (g, chosen, _) in st.wave_tune.iter_mut() {
+                        if g.options.iter().any(|o| is_activity(&o.seed)) {
+                            *chosen = NOTHING;
+                        }
+                    }
+                    None
+                };
+                let settings: Vec<String> = st
+                    .wave_tune
                     .iter()
                     .filter_map(|(g, chosen, _)| g.options.get(*chosen))
-                    .filter(|o| !o.any)
+                    .filter(|o| !o.any && !is_activity(&o.seed))
                     .map(|o| o.seed.clone())
-                    .collect()
+                    .collect();
+                (settings, activity)
             };
             c.show_wave_settings();
             c.st.borrow_mut().trailer = None;
-            c.player.send(Cmd::TuneWave(settings));
+            match activity {
+                Some(a) => c.player.send(Cmd::Wave(Source::Seed { station: a.seed, header: "Моя волна".into(), title: a.name })),
+                None => {
+                    c.st.borrow_mut().tune_seeds = settings.clone();
+                    c.player.send(Cmd::TuneWave(settings));
+                }
+            }
             c.start();
         })
     });
     app.on_reset_wave(|| {
         with_ctx(|c| {
             c.st.borrow_mut().trailer = None;
+            c.st.borrow_mut().tune_seeds.clear();
             c.player.send(Cmd::Wave(Source::Wave));
             c.start();
         })

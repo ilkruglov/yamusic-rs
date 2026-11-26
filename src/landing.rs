@@ -15,6 +15,11 @@ pub struct BlockDef {
     pub uri: Option<String>,
     /// Есть ли «Смотреть всё» (стрелка у заголовка).
     pub more: bool,
+    /// Куда ведёт «Смотреть всё» (`viewAllAction.weblink`), см. [`web_target`].
+    pub more_target: Option<String>,
+    /// Текст блока OVERVIEW и сколько строк его видно (`message`, `visibleLines`).
+    pub text: String,
+    pub lines: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -27,6 +32,8 @@ pub struct Tab {
 
 #[derive(Clone, Debug, Default)]
 pub struct Skeleton {
+    /// Заголовок страницы: «Жанры», «Эпохи».
+    pub title: String,
     /// Блоки над вкладками (у «Книг и подкастов» — «Продолжить слушать»).
     pub head: Vec<BlockDef>,
     pub tabs: Vec<Tab>,
@@ -98,6 +105,9 @@ fn defs(v: &Value) -> Vec<BlockDef> {
                         desc: str_of(&d, "description"),
                         uri: d.pointer("/source/uri").and_then(|u| u.as_str()).map(String::from),
                         more: d.get("viewAllAction").is_some(),
+                        more_target: d.pointer("/viewAllAction/weblink").and_then(|w| w.as_str()).map(web_target),
+                        text: str_of(&d, "message"),
+                        lines: d.get("visibleLines").and_then(|n| n.as_u64()).unwrap_or(0) as u32,
                     })
                 })
                 .collect()
@@ -107,7 +117,7 @@ fn defs(v: &Value) -> Vec<BlockDef> {
 
 /// Скелет страницы; вкладки с подписями и обложками приходят отдельным запросом.
 pub fn parse_skeleton(v: &Value, tabs: Option<&Value>) -> Skeleton {
-    let mut sk = Skeleton::default();
+    let mut sk = Skeleton { title: str_of(v, "title"), ..Default::default() };
     for b in v.get("blocks").and_then(|b| b.as_array()).into_iter().flatten() {
         if b.get("type").and_then(|t| t.as_str()) != Some("TABS") {
             sk.head.extend(defs(&Value::Array(vec![b.clone()])));
@@ -232,7 +242,13 @@ fn item_card(it: &Value) -> Option<LCard> {
                 .map(|a| a.iter().filter_map(|c| c.get("uri")?.as_str().map(String::from)).collect())
                 .unwrap_or_default(),
             bg: hex_color(d.pointer("/covers/1/color")).or_else(|| hex_color(d.pointer("/covers/0/color"))),
-            target: format!("tag:{}", d.pointer("/action/weblink").and_then(|w| w.as_str()).unwrap_or("").trim_start_matches("/tag/")),
+            target: d.pointer("/action/weblink").and_then(|w| w.as_str()).map(web_target).unwrap_or_default(),
+            ..Default::default()
+        }),
+        // Строка списка «Все жанры» (ITEM_LIST): название и ссылка на лендинг жанра.
+        "menu_item" => Some(LCard {
+            title: str_of(d, "title"),
+            target: web_target(d.pointer("/viewAllAction/weblink").and_then(|w| w.as_str())?),
             ..Default::default()
         }),
         "concert_item" => {
@@ -378,6 +394,8 @@ pub fn parse_block(kind: &str, v: &Value) -> LBlock {
                 b.tabs.push((str_of(&t, "title"), None, cards));
             }
         }
+        // Волны жанров и волна тега: те же кнопки вайбов, но одним списком, без вкладок.
+        "EDITORIAL_WAVES" | "META_TAG_WAVE" => b.cards = items("items").iter().filter_map(vibe_card).collect(),
         "NEW_RELEASES" | "EDITORIAL_NEW_RELEASES" => b.cards = items("newReleases").iter().filter_map(release_lcard).collect(),
         "IN_STYLE" => {
             for t in items("inStyleTabs") {
@@ -496,7 +514,7 @@ pub fn parse_block(kind: &str, v: &Value) -> LBlock {
 }
 
 /// Ссылка из блока: внутренняя страница приложения или веб-страница.
-fn web_target(link: &str) -> String {
+pub fn web_target(link: &str) -> String {
     let q = |name: &str| {
         link.split(['?', '&'])
             .find_map(|p| p.strip_prefix(&format!("{name}=")))
@@ -514,6 +532,13 @@ fn web_target(link: &str) -> String {
     }
     if link.starts_with("/webview") {
         return format!("url:{}", webview_url(link));
+    }
+    // Подборка (`/tag/autumn`) и лендинг по скелету (`/landing/music_genres`): маршруты
+    // `/tag/[tagId]` и `/landing/[skeleton]` оригинала.
+    for (prefix, kind) in [("/tag/", "tag"), ("/landing/", "landing")] {
+        if let Some(id) = link.strip_prefix(prefix).map(|r| r.split(['/', '?', '#']).next().unwrap_or("")).filter(|id| !id.is_empty()) {
+            return format!("{kind}:{id}");
+        }
     }
     // Относительная ссылка — только от «/»: склейка с `.evil.com/` или `@evil.com/` увела бы
     // на чужой хост. Остальное — как есть; схему и хост проверяет `client::browser_url`
@@ -571,6 +596,36 @@ mod tests {
         assert_eq!(webview_url("/promo"), "https://music.yandex.ru/promo");
         assert_eq!(webview_url(".evil.com/"), ".evil.com/");
         assert_eq!(webview_url("https://music.yandex.ru/x"), "https://music.yandex.ru/x");
+        assert_eq!(web_target("/tag/autumn"), "tag:autumn");
+        assert_eq!(web_target("/landing/music_genres"), "landing:music_genres");
+        assert_eq!(web_target("/landing/"), "url:https://music.yandex.ru/landing/");
+    }
+
+    #[test]
+    fn collections() {
+        // «Подборки музыки»: карточка ведёт в свой раздел, а не в поиск по названию (#134).
+        let mixes = parse_block(
+            "MIXES_MUSIC",
+            &serde_json::json!({"items": [
+                {"type": "mix_card_item", "data": {"title": "Осеннее", "action": {"weblink": "/tag/autumn"}}},
+                {"type": "mix_card_item", "data": {"title": "Жанры", "action": {"weblink": "/landing/music_genres"}}},
+            ]}),
+        );
+        assert_eq!(mixes.cards.iter().map(|c| c.target.as_str()).collect::<Vec<_>>(), ["tag:autumn", "landing:music_genres"]);
+        let list = parse_block("ITEM_LIST", &serde_json::json!({"items": [{"type": "menu_item", "data": {"title": "Джаз", "viewAllAction": {"weblink": "/landing/tag_jazz"}}}]}));
+        assert_eq!((list.cards[0].title.as_str(), list.cards[0].target.as_str()), ("Джаз", "landing:tag_jazz"));
+        let waves = parse_block("EDITORIAL_WAVES", &serde_json::json!({"items": [{"stationId": "micro-genre:psybient", "title": "Псайбиент", "header": "Моя волна по жанру"}]}));
+        assert_eq!((waves.cards[0].extra.as_str(), waves.cards[0].target.as_str()), ("Моя волна по жанру", "station:micro-genre:psybient"));
+        let sk = parse_skeleton(
+            &serde_json::json!({"title": "Зимнее", "blocks": [{"type": "TABS", "data": {"tabs": [{"title": "Зимнее", "blocks": [
+                {"id": "o", "type": "OVERVIEW", "data": {"title": "Зимнее", "message": "Текст", "visibleLines": 3}},
+                {"id": "p", "type": "META_TAG_POPULAR_PLAYLISTS", "data": {"title": "Популярные плейлисты", "source": {"uri": "/x"}, "viewAllAction": {"weblink": "/landing/tag_winter"}}},
+            ]}]}}]}),
+            None,
+        );
+        let b = &sk.tabs[0].blocks;
+        assert_eq!((sk.title.as_str(), b[0].text.as_str(), b[0].lines), ("Зимнее", "Текст", 3));
+        assert_eq!(b[1].more_target.as_deref(), Some("landing:tag_winter"));
     }
 
     #[test]

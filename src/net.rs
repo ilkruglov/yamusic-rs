@@ -148,6 +148,19 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
                 artist: None,
             })
         }),
+        "dislikes" => {
+            let ids = api.disliked_ids(uid)?;
+            let tracks = if ids.is_empty() { Vec::new() } else { api.tracks(&ids)? };
+            Ok(Data::List(ListData {
+                kind: ListKind::Tracks,
+                title: "Мои дизлайки".into(),
+                covers: Vec::new(),
+                tracks,
+                playlist: None,
+                album: None,
+                artist: None,
+            }))
+        }
         "artist-tracks" | "familiar" => {
             let info = api.get_raw(&format!("/artists/{arg}/info"))?;
             let a = info.get("artist").and_then(crate::api::parse_artist).ok_or("нет данных об исполнителе")?;
@@ -232,7 +245,13 @@ impl Net {
         self.update_likes(track, liked, true);
     }
 
+    /// Выкинуть ключ из кэша: при следующем открытии загрузится заново.
+    pub fn forget(&self, key: &str) {
+        self.store.lock().unwrap().remove(key);
+    }
+
     pub(crate) fn dislike_saved(&self, track: &Track) {
+        self.forget("dislikes");
         // Дизлайк мог относиться к треку, у которого вообще не было лайка.
         self.update_likes(track, false, false);
     }

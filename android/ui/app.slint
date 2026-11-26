@@ -2,7 +2,7 @@
 
 import { Icons, WheelCard, Row, ArtistCard, Now, Cover, T } from "common.slint";
 import { Player } from "player.slint";
-import { MenuSheet, QualitySheet, TimerSheet, TrackSheet, PickSheet, ArtistsSheet } from "sheets.slint";
+import { MenuSheet, QualitySheet, TimerSheet, TrackSheet, PickSheet, ArtistsSheet, AboutSheet } from "sheets.slint";
 import { Prof, ProfileScreens, AboutPage, LogoutSheet } from "profile.slint";
 import { Pages, PageView, MiniPlayer, PCard, PRow, PBlock, PPage } from "pages.slint";
 
@@ -711,6 +711,10 @@ export component App inherits EdgeSwipeGuard {
         height: root.height;
     }
     ArtistsSheet {
+        width: root.width;
+        height: root.height;
+    }
+    AboutSheet {
         width: root.width;
         height: root.height;
     }

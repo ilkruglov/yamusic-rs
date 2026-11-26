@@ -7,6 +7,7 @@ use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::Method;
 use serde_json::{json, Value};
 use sha2::Sha256;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -171,6 +172,8 @@ pub struct Track {
     /// Оттенок и энергия трека: по ним «Моя волна» на телефоне красит фон.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub mood: Option<Mood>,
+    /// `type` трека: music, podcast-episode, audiobook, fairy-tale… Пусто — music.
+    pub kind: String,
 }
 
 /// `trackParameters` из ответа API.
@@ -186,6 +189,16 @@ impl Track {
     pub fn detached(mut self) -> Self {
         self.playlist_slot = None;
         self
+    }
+
+    /// Выпуск подкаста (`isTrackPodcast` оригинала).
+    pub fn is_episode(&self) -> bool {
+        self.kind == "podcast-episode"
+    }
+
+    /// Глава аудиокниги. Сказку (`fairy-tale`) оригинал считает обычным треком: «О треке».
+    pub fn is_chapter(&self) -> bool {
+        self.kind == "audiobook"
     }
 
     /// "trackId:albumId" — такой формат ждут лайки и фидбек волны.
@@ -219,6 +232,7 @@ pub struct Album {
     pub cover: Option<String>,
     pub likes: u64,
     pub label: String,
+    pub label_id: Option<NonZeroU64>,
     pub artist_cover: Option<String>,
     pub artist_list: Vec<Named>,
 }
@@ -287,7 +301,7 @@ impl WheelItem {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Pin {
     pub title: String,
     pub subtitle: String,
@@ -327,6 +341,63 @@ pub struct Lyrics {
     pub source: String,
     pub text: Vec<String>,
     pub writers: String,
+}
+
+/// Что окно «О треке» берёт из `full-info`: описание и альбом (подкаст, книга).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrackInfo {
+    pub short_description: String,
+    pub album_id: Option<String>,
+    pub album_title: String,
+}
+
+/// Участники записи (`tracks/{id}/credits`): пары «роль — имя» в порядке ответа. Подписи
+/// ролей приходят с сервера.
+pub fn parse_credits(v: &Value) -> Vec<(String, String)> {
+    v.get("credits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let title = c.get("title")?.as_str()?.trim();
+            let value = c.get("value")?.as_str()?.trim();
+            (!title.is_empty() && !value.is_empty()).then(|| (title.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// Текст из HTML описания выпуска: теги убираются, `<br>` и абзацы — переводы строк,
+/// сущности раскрываются. Оригинал вставляет HTML как есть, Slint его не рисует.
+pub fn plain_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&rest[..i]);
+        let Some(j) = rest[i..].find('>') else {
+            out.push_str(&rest[i..]);
+            rest = "";
+            break;
+        };
+        let tag = rest[i + 1..i + j].trim_start_matches('/').to_ascii_lowercase();
+        let name = tag.split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("");
+        if matches!(name, "br" | "p" | "div" | "li") && !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        rest = &rest[i + j + 1..];
+    }
+    out.push_str(rest);
+    let out = out
+        .replace("&nbsp;", "\u{a0}")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&laquo;", "«")
+        .replace("&raquo;", "»")
+        .replace("&mdash;", "—")
+        .replace("&ndash;", "–")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    out.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_string()
 }
 
 /// Откуда брать следующий пакет волны.
@@ -527,6 +598,7 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
         position: album.and_then(|a| a.pointer("/trackPosition/index")).and_then(|y| y.as_u64()).map(|y| y as u32),
         batch_id: String::new(),
         mood: mood_of(v),
+        kind: str_of(v, "type"),
     })
 }
 
@@ -568,6 +640,13 @@ pub(crate) fn parse_album(v: &Value) -> Option<Album> {
             .map(String::from),
         likes: v.get("likesCount").and_then(|c| c.as_u64()).unwrap_or(0),
         label: v.pointer("/labels/0/name").and_then(|l| l.as_str()).unwrap_or("").to_string(),
+        label_id: v.pointer("/labels/0/id").and_then(|id| {
+            if let Some(id) = id.as_str() {
+                id.parse().ok()
+            } else {
+                id.as_u64().and_then(NonZeroU64::new)
+            }
+        }),
         artist_cover: v.pointer("/artists/0/cover/uri").and_then(|u| u.as_str()).map(String::from),
     })
 }
@@ -949,7 +1028,7 @@ pub fn parse_card(it: &Value) -> Option<Card> {
                 .unwrap_or_default(),
             round: false,
             explicit: false,
-            target: format!("tag:{}", d.pointer("/action/weblink").and_then(|w| w.as_str()).unwrap_or("").trim_start_matches("/tag/")),
+            target: d.pointer("/action/weblink").and_then(|w| w.as_str()).map(crate::landing::web_target).unwrap_or_default(),
         },
         _ => return None,
     })
@@ -1358,6 +1437,32 @@ impl Api {
         Ok(cards(&self.get_raw(&format!("/landing/block/{id}/entities?page=0&pageSize=100"))?))
     }
 
+    /// Подборка (`/tag/autumn`): название тега и его плейлисты, как TagPage оригинала —
+    /// `tags/{id}/playlist-ids`, затем сами плейлисты `playlists?playlistIds=uid:kind,…`.
+    pub fn tag_playlists(&self, id: &str) -> Res<(String, Vec<Card>)> {
+        let v = self.get_raw(&format!("/tags/{id}/playlist-ids"))?;
+        let title = v.pointer("/tag/name").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let ids: Vec<String> = v
+            .get("ids")
+            .and_then(|i| i.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|x| Some(format!("{}:{}", s(x.get("uid"))?, s(x.get("kind"))?)))
+            .collect();
+        if ids.is_empty() {
+            return Ok((title, Vec::new()));
+        }
+        let v = self.get_raw(&format!("/playlists?resumeStream=false&playlistIds={}", ids.join(",")))?;
+        let cards = v
+            .get("playlists")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|x| Some(Card { likes: x.get("likesCount").and_then(|l| l.as_u64()), ..playlist_card(&parse_playlist(x)?) }))
+            .collect();
+        Ok((title, cards))
+    }
+
     /// Вкладки «Смотреть всё» коллекции: block — playlists-liked-and-playlists-created или albums-liked-and-albums-presaved.
     pub fn collection_tabs(&self, block: &str) -> Res<Vec<(String, Vec<Card>)>> {
         let v = self.get_raw(&format!("/landing-blocks/collection/{block}?count=500"))?;
@@ -1373,6 +1478,19 @@ impl Api {
     pub fn artist_albums(&self, id: &str, path: &str) -> Res<Vec<Card>> {
         let v = self.get_raw(&format!("/artists/{id}/{path}?page=0&page-size=200&sort-by=year"))?;
         Ok(v.get("albums").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(parse_album).map(|a| album_card(&a)).collect()).unwrap_or_default())
+    }
+
+    pub fn label_albums(&self, id: &str, limit: usize, by_popularity: bool) -> Res<Vec<Card>> {
+        let page_size = limit.to_string();
+        let sort = if by_popularity { "rating" } else { "year" };
+        let v = self.get(&format!("/labels/{id}/albums"), &[("page", "0"), ("pageSize", &page_size), ("sortBy", sort), ("sortOrder", "desc")])?;
+        Ok(v.get("albums").and_then(Value::as_array).into_iter().flatten().filter_map(parse_album).map(|a| album_card(&a)).collect())
+    }
+
+    pub fn label_artists(&self, id: &str, limit: usize) -> Res<Vec<Card>> {
+        let page_size = limit.to_string();
+        let v = self.get(&format!("/labels/{id}/artists"), &[("page", "0"), ("pageSize", &page_size)])?;
+        Ok(v.get("artists").and_then(Value::as_array).into_iter().flatten().filter_map(parse_artist).map(|a| artist_card(&a)).collect())
     }
 
     pub fn similar_artists(&self, id: &str) -> Res<Vec<Card>> {
@@ -1418,8 +1536,11 @@ impl Api {
         Ok(v.as_array().map(|a| a.iter().filter_map(|x| s(x.get("id"))).collect()).unwrap_or_default())
     }
 
-    pub fn wheel(&self) -> Res<Vec<WheelItem>> {
-        let (status, text) = self.send_text(self.desktop_req(Method::POST, "/wheel/new").json(&json!({})))?;
+    /// Колесо вайбов для играющей волны: по ней сервер решает, нужны ли «Назад к привычному»
+    /// и «Встряхнуть», как `wheelNew({context})` оригинала. Пустые `seeds` — без контекста.
+    pub fn wheel(&self, seeds: &[String]) -> Res<Vec<WheelItem>> {
+        let body = if seeds.is_empty() { json!({}) } else { json!({ "context": { "type": "WAVE", "data": { "seeds": seeds } } }) };
+        let (status, text) = self.send_text(self.desktop_req(Method::POST, "/wheel/new").json(&body))?;
         if !status.is_success() {
             return Err(format!("HTTP {status}: {}", short(&text)));
         }
@@ -1607,10 +1728,29 @@ impl Api {
     }
 
     /// Какие настройки есть у «Моей волны»: названия, картинки и seeds приходят с сервера.
+    /// Первая группа — «Под занятие»: у её вариантов seed — станция `activity:…`.
     pub fn wave_setting_groups(&self) -> Res<Vec<WaveSettingGroup>> {
         let v = self.get("/rotor/wave/settings", &[])?;
         let all = v.get("settingRestrictions").ok_or("нет settingRestrictions")?;
-        let groups = ["diversity", "moodEnergy", "language"]
+        let activities: Vec<WaveSettingOption> = v
+            .get("blocks")
+            .and_then(|b| b.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("contexts"))
+            .filter_map(|b| b.get("items")?.as_array())
+            .flatten()
+            .filter_map(|it| {
+                Some(WaveSettingOption {
+                    name: str_of(it, "name"),
+                    seed: format!("{}:{}", it.pointer("/id/type")?.as_str()?, it.pointer("/id/tag")?.as_str()?),
+                    image: it.get("fullImageUrl").and_then(|u| u.as_str()).map(|u| pic(u, 48)),
+                    any: false,
+                })
+            })
+            .collect();
+        let activity = (!activities.is_empty()).then(|| WaveSettingGroup { name: "Под занятие".into(), options: activities });
+        let groups = activity.into_iter().chain(["diversity", "moodEnergy", "language"]
             .iter()
             .filter_map(|key| all.get(*key))
             .map(|g| WaveSettingGroup {
@@ -1625,7 +1765,7 @@ impl Api {
                         any: o.get("unspecified").and_then(|u| u.as_bool()).unwrap_or(false),
                     }).collect())
                     .unwrap_or_default(),
-            })
+            }))
             .collect();
         Ok(groups)
     }
@@ -1685,6 +1825,20 @@ impl Api {
                 .form(&[("track-ids", track_full_id)]),
         )
         .map(|v| crate::config::log(format!("dislike {action} {track_full_id}: {v}")))
+    }
+
+    pub fn dislike_artist(&self, uid: &str, id: &str, remove: bool) -> Res<()> {
+        let action = if remove { "remove" } else { "add-multiple" };
+        self.send(self.req(Method::POST, &format!("/users/{uid}/dislikes/artists/{action}")).form(&[("artist-ids", id)]))
+            .map(|_| ())
+    }
+
+    /// Исполнители с дизлайком, новые сверху.
+    pub fn disliked_artists(&self, uid: &str) -> Res<Vec<Artist>> {
+        let v = self.get(&format!("/users/{uid}/dislikes/artists"), &[("with-timestamps", "false")])?;
+        Ok(v.as_array()
+            .map(|a| a.iter().filter_map(|x| parse_artist(x.get("artist").unwrap_or(x))).collect())
+            .unwrap_or_default())
     }
 
     pub fn disliked_ids(&self, uid: &str) -> Res<Vec<String>> {
@@ -1884,6 +2038,34 @@ impl Api {
         Ok(out)
     }
 
+    /// Участники записи для окна «О треке».
+    pub fn track_credits(&self, id: &str) -> Res<Vec<(String, String)>> {
+        Ok(parse_credits(&self.get(&format!("/tracks/{id}/credits"), &[])?))
+    }
+
+    /// `tracks/{id}:{albumId}/full-info` (без альбома — `tracks/{id}/full-info`): описание
+    /// и альбом выпуска или главы.
+    pub fn track_full_info(&self, id: &str, album: Option<&str>) -> Res<TrackInfo> {
+        let path = match album {
+            Some(a) => format!("/tracks/{id}:{a}/full-info"),
+            None => format!("/tracks/{id}/full-info"),
+        };
+        let v = self.get(&path, &[])?;
+        let t = v.get("track").unwrap_or(&v);
+        let album = t.pointer("/albums/0");
+        Ok(TrackInfo {
+            short_description: str_of(t, "shortDescription"),
+            album_id: album.and_then(|a| s(a.get("id"))),
+            album_title: album.map(|a| str_of(a, "title")).unwrap_or_default(),
+        })
+    }
+
+    /// Описание выпуска (`tracks/{id}/supplement`), текстом.
+    pub fn track_supplement(&self, id: &str) -> Res<String> {
+        let v = self.get(&format!("/tracks/{id}/supplement"), &[])?;
+        Ok(plain_text(&str_of(&v, "description")))
+    }
+
     // ---------- аудио ----------
 
     /// Прямая ссылка на аудио и его формат («MP3 320»): сначала download-info (mp3 до 320),
@@ -2044,6 +2226,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn album_label_link_requires_a_numeric_id() {
+        let mut data = serde_json::json!({
+            "id": 1, "title": "Album", "labels": [{"id": 12, "name": "Label"}]
+        });
+        for (id, expected) in [
+            (serde_json::json!(12), Some(12)),
+            (serde_json::json!("12"), Some(12)),
+            (Value::Null, None),
+            (serde_json::json!(0), None),
+            (serde_json::json!("12/other"), None),
+        ] {
+            data["labels"][0]["id"] = id;
+            let album = parse_album(&data).unwrap();
+            assert_eq!(album.label, "Label");
+            assert_eq!(album.label_id.map(NonZeroU64::get), expected);
+        }
+    }
+
+    #[test]
     fn lrc() {
         let l = parse_lrc("[00:04.64] Uh, check\n[00:05.99] \n[01:15.26] Are you listening?\n[01:20.00]");
         assert_eq!(l.len(), 3);
@@ -2056,6 +2257,33 @@ mod tests {
     #[test]
     fn pic_size() {
         assert_eq!(pic("avatars.yandex.net/a/%%", 200), "https://avatars.yandex.net/a/200x200");
+    }
+
+    #[test]
+    fn credits_and_html() {
+        let v = json!({"credits": [
+            {"title": "Исполнитель", "value": "почтисчастье"},
+            {"title": "Автор музыки", "value": ""},
+            {"title": "Лейбл", "value": "Свет и Тени"}]});
+        assert_eq!(
+            parse_credits(&v),
+            vec![("Исполнитель".to_string(), "почтисчастье".to_string()), ("Лейбл".to_string(), "Свет и Тени".to_string())]
+        );
+        assert!(parse_credits(&json!({})).is_empty());
+        assert_eq!(plain_text("<p>Гость &laquo;А&raquo;</p><p>Ведущие: <b>Б</b> &amp; В<br/>Слушайте</p>"), "Гость «А»\nВедущие: Б & В\nСлушайте");
+        assert_eq!(plain_text("просто текст"), "просто текст");
+    }
+
+    #[test]
+    fn track_kind() {
+        let t = |kind: &str| parse_track(&json!({"id": 1, "title": "A", "type": kind})).unwrap();
+        assert!(t("podcast-episode").is_episode());
+        assert!(t("audiobook").is_chapter() && !t("audiobook").is_episode());
+        // Сказка у оригинала — «О треке», не «О главе».
+        assert!(!t("fairy-tale").is_chapter() && !t("fairy-tale").is_episode());
+        assert!(!t("music").is_episode() && !t("music").is_chapter());
+        let plain = parse_track(&json!({"id": 1, "title": "A"})).unwrap();
+        assert!(!plain.is_episode() && !plain.is_chapter());
     }
 }
 

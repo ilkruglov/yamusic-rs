@@ -269,6 +269,20 @@ component CollectionContent inherits TouchArea {
                     clicked => { App.open-album(i); }
                 }
             }
+
+            // «Мои дизлайки»: треки открываются списком, исполнители сеткой.
+            Rectangle {
+                height: 73px;
+                BlockHeader { x: 0; y: 0; text: T.t("Мои дизлайки"); clicked => { App.open-card("dislikes", 0); } }
+                HorizontalLayout {
+                    y: 37px;
+                    height: 36px;
+                    spacing: 8px;
+                    alignment: start;
+                    Tab { text: T.t("Треки"); clicked => { App.open-card("dislikes", 0); } }
+                    Tab { text: T.t("Исполнители"); clicked => { App.open-grid("disliked-artists", T.t("Мои дизлайки")); } }
+                }
+            }
         }
     }
     ScrollBar {

@@ -31,7 +31,7 @@ pub fn start(ui: &App, api: Arc<Api>, images: Images) {
         *h.borrow_mut() = Some(Home { ui: ui.as_weak(), images, blobs: Blobs::default(), wheel: Vec::new() });
     });
     std::thread::spawn(move || {
-        let wheel = api.wheel();
+        let wheel = api.wheel(&[]);
         let _ = slint::invoke_from_event_loop(move || match wheel {
             Ok(items) => {
                 with_home(|h| h.set_wheel(items));

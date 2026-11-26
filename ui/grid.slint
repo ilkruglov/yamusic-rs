@@ -1,15 +1,17 @@
 // Сетка карточек для страниц «Смотреть всё» (плейлисты, альбомы).
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, NavCircle, ScrollBar } from "widgets.slint";
+import { Icons, Icon, NavCircle, PillButton, ScrollBar } from "widgets.slint";
 import { T, App } from "state.slint";
 import { Tab } from "rows.slint";
-import { CardTile } from "shelf.slint";
+import { CardTile, Shelf } from "shelf.slint";
 
 // Страница «Смотреть всё»: заголовок с кнопкой назад, вкладки и сетка карточек от 204,
 // как CollectionAlbumsPage / CollectionPlaylistsPage оригинала.
 export component GridPage inherits Rectangle {
     property <length> pad: 25px;
+    property <string> current-title: App.grid-title;
+    changed current-title => { flick.content-y = 0px; }
 
     flick := Flickable {
         property <length> w: self.width - 2 * pad;
@@ -27,7 +29,7 @@ export component GridPage inherits Rectangle {
         init => { App.grid-viewport(first, capacity); }
         changed first => { App.grid-viewport(first, capacity); }
         changed capacity => { App.grid-viewport(first, capacity); }
-        content-height: top + ceil(n / cols) * (size + 112px) + 24px;
+        content-height: App.grid-label ? label-overview.y + label-overview.height + 24px : top + ceil(n / cols) * (size + 112px) + 24px;
 
         if App.can-back: NavCircle {
             x: pad;
@@ -38,7 +40,7 @@ export component GridPage inherits Rectangle {
         Text {
             x: App.can-back ? 73px : pad;
             y: 25px;
-            width: parent.width - self.x - pad;
+            width: parent.width - self.x - pad - (sort-label.visible ? sort-label.width + 12px : 0px);
             height: 32px;
             text: App.grid-title;
             overflow: elide;
@@ -47,6 +49,15 @@ export component GridPage inherits Rectangle {
             font-size: Theme.font-size-headline-xl;
             font-weight: 700;
             color: Theme.controls-color-primary-text-enabled-variant;
+        }
+        sort-label := PillButton {
+            visible: App.grid-label-sortable;
+            x: parent.width - pad - self.width;
+            y: 21px;
+            text: App.grid-label-popular ? T.t("По популярности") : T.t("По дате выхода");
+            icon: Icons.arrow-down-tiny;
+            has-icon: true;
+            clicked => { App.open-label-sort(self.absolute-position.x + self.width / 2, self.absolute-position.y + self.height); }
         }
         if App.grid-tabs.length > 1: HorizontalLayout {
             x: pad;
@@ -58,6 +69,27 @@ export component GridPage inherits Rectangle {
                 selected: i == App.grid-tab;
                 clicked => { App.select-grid-tab(i); }
             }
+        }
+
+        label-overview := VerticalLayout {
+            visible: App.grid-label;
+            x: pad;
+            y: 78px;
+            width: flick.w;
+            height: self.preferred-height;
+            spacing: 20px;
+            alignment: start;
+            HorizontalLayout {
+                alignment: start;
+                PillButton {
+                    text: T.t("Поделиться");
+                    icon: Icons.m-share;
+                    has-icon: true;
+                    clicked => { App.share-label(); }
+                }
+            }
+            Shelf { title: T.t("Релизы"); block: "label-releases"; items: App.grid-label-releases; }
+            Shelf { title: T.t("Исполнители"); block: "label-artists"; items: App.grid-label-artists; }
         }
 
         // «Новый плейлист» — первая карточка во вкладке «Вы собрали».

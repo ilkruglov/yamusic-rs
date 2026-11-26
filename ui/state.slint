@@ -1,7 +1,7 @@
 // Общее состояние интерфейса (глобал App), структуры строк и карточек, переводы (T).
 // Rust пишет сюда данные и подписывается на колбэки.
 
-export enum Page { wave, search, trends, concerts, nonmusic, collection, list, artist, artists, settings, grid, chart, history }
+export enum Page { wave, search, trends, concerts, nonmusic, collection, list, artist, artists, settings, grid, chart, history, landing }
 
 // Строка окна «Горячие клавиши»: подпись и клавиши по ячейкам («—» — пусто).
 export struct ShortcutItem {
@@ -120,6 +120,8 @@ export struct LBlock {
     button-fg: color,
     ink: color,
     ad: bool,
+    // OVERVIEW: сколько строк описания видно до «Далее».
+    lines: int,
 }
 
 export struct LyricLine {
@@ -132,6 +134,7 @@ export struct MenuEntry {
     text: string,
     icon: image,
     submenu: bool,
+    checked: bool,
 }
 
 export struct WaveOption {
@@ -161,6 +164,15 @@ export struct TopArtistItem {
     rank: string,
     trend: int,
     time: string,
+}
+
+// Строка окна «О треке»: роль и имя или описание; `link` — ведёт на альбом, `shimmer` —
+// заглушка на месте того, что грузится.
+export struct InfoLine {
+    title: string,
+    value: string,
+    link: bool,
+    shimmer: bool,
 }
 
 // Перевод: русская строка → строка выбранного языка (словари оригинала, см. src/i18n.rs).
@@ -194,6 +206,10 @@ export global App {
     callback update-changes();
     // «Проверять обновления» в настройках.
     in property <bool> check-updates: true;
+    // Итог последней проверки обновлений для настроек: пусто — ещё не проверяли.
+    in property <string> update-status;
+    // Проверка не удалась: в настройках ссылка на страницу релизов.
+    in property <bool> update-failed;
     // «Треки 18+» в меню профиля.
     in property <bool> allow-explicit: true;
     // Подсказка у значка «!»: текст дисклеймера рядом с курсором.
@@ -277,6 +293,7 @@ export global App {
     in property <string> list-year;
     in property <string> list-likes;
     in property <string> list-label;
+    in property <string> list-label-id;
     in property <bool> list-own;
     // Правка своего плейлиста: 0 — нет, 1 — название, 2 — описание (поле названия тоже открыто).
     in-out property <int> list-edit;
@@ -419,6 +436,12 @@ export global App {
     in property <int> landing-tab;
     in property <bool> landing-loading;
     in property <bool> landing-location;
+    // Лендинг, открытый по ссылке («Жанры», «Эпохи»): кнопка «назад» у заголовка.
+    in property <bool> landing-back;
+    // Окно «Далее» у описания жанра (OverviewBlock оригинала): заголовок и весь текст.
+    in-out property <bool> overview-open;
+    in-out property <string> overview-title;
+    in-out property <string> overview-text;
     in property <string> concert-mask;
     in property <string> concert-mask-top;
     in property <image> concert-date-bg;
@@ -462,13 +485,28 @@ export global App {
     callback grid-viewport(int, int);
     in property <[CardItem]> grid-cards;
     in property <bool> grid-create;
+    in property <bool> grid-label;
+    in property <bool> grid-label-sortable;
+    in property <bool> grid-label-popular;
+    in property <[CardItem]> grid-label-releases;
+    in property <[CardItem]> grid-label-artists;
     callback open-grid(string, string);
+    callback share-label();
+    callback open-label-sort(length, length);
     callback select-grid-tab(int);
 
     // Обложка на всё окно (ImageSliderModal оригинала).
     in-out property <bool> cover-open;
     in property <image> cover-view;
     callback open-cover(string);
+
+    // Окно «О треке».
+    in-out property <bool> track-about-open;
+    in property <string> track-about-title;
+    in property <string> track-about-version;
+    in property <bool> track-about-explicit;
+    in property <[InfoLine]> track-about-lines;
+    callback track-about-link(int);
 
     in property <bool> nav-collapsed;
     callback toggle-navbar();
@@ -603,6 +641,11 @@ export global App {
     callback minimize();
     // Мини-плеер поверх всех окон.
     in-out property <bool> mini;
+    // Всплывающая подсказка: текст и точка привязки в окне. Сверху — над точкой, иначе справа от неё.
+    in-out property <string> tip;
+    in-out property <length> tip-x;
+    in-out property <length> tip-y;
+    in-out property <bool> tip-above;
     callback toggle-mini();
     callback close();
 

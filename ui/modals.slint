@@ -137,3 +137,63 @@ export component ShortcutsModal inherits Rectangle {
         for item[i] in App.shortcuts: ShortcutRow { text: item.title; keys: item.keys; item: i; }
     }
 }
+
+// Окно «Далее» у описания жанра (модальное окно OverviewBlock оригинала): справа снизу с
+// отступом 16, шире 430 не бывает; шапка — поля 20 сверху и 16 по бокам, под заголовком 32;
+// текст 16/24 (text-l), прокручивается, если не помещается.
+export component OverviewModal inherits Rectangle {
+    in property <length> limit;
+    width: 430px;
+    height: min(root.limit, body.y + msg.preferred-height + Theme.spacer-size-xl);
+    border-radius: 16px;
+    background: Theme.background-color-primary-enabled-popover;
+    border-width: 1px;
+    border-color: Theme.outline-color-primary-disabled;
+    drop-shadow-blur: 20px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: Theme.dark ? #0000007a : #0000003d;
+    clip: true;
+    TouchArea { }
+
+    title := Text {
+        x: Theme.spacer-size-l;
+        y: Theme.spacer-size-xl;
+        width: parent.width - 2 * Theme.spacer-size-l - 32px - Theme.spacer-size-xs;
+        height: 32px;
+        text: App.overview-title;
+        overflow: elide;
+        vertical-alignment: center;
+        font-family: App.headline-font;
+        font-size: Theme.font-size-headline-xs;
+        font-weight: 700;
+        color: Theme.controls-color-primary-text-enabled-variant;
+    }
+    Rectangle {
+        x: parent.width - Theme.spacer-size-l - 32px;
+        y: Theme.spacer-size-xl;
+        width: 32px;
+        height: 32px;
+        border-radius: 16px;
+        background: close-ta.has-hover ? Theme.controls-color-secondary-default-hovered : Theme.controls-color-secondary-default-enabled;
+        animate background { duration: App.motion ? Theme.duration-transition : 0ms; easing: ease; }
+        Icon { source: Icons.close-small; size: 20px; colorize: Theme.controls-color-primary-text-enabled-variant; }
+        close-ta := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { App.overview-open = false; }
+        }
+    }
+    body := Flickable {
+        x: Theme.spacer-size-l;
+        y: Theme.spacer-size-xl + 32px + (App.overview-title != "" ? Theme.spacer-size-xxxl : Theme.spacer-size-l);
+        width: parent.width - 2 * Theme.spacer-size-l;
+        height: parent.height - self.y - Theme.spacer-size-xl;
+        content-height: msg.preferred-height;
+        msg := Text {
+            width: parent.width;
+            text: App.overview-text;
+            wrap: word-wrap;
+            font-size: Theme.font-size-label-l;
+            color: Theme.controls-color-primary-text-enabled-variant;
+        }
+    }
+}

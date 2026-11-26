@@ -33,6 +33,18 @@ component NavLink inherits Rectangle {
         mouse-cursor: MouseCursor.pointer;
         clicked => { App.navigate(page); }
     }
+    // В свёрнутой панели подпись видна только подсказкой.
+    property <bool> tip-hot: App.nav-collapsed && ta.has-hover;
+    changed tip-hot => {
+        if self.tip-hot {
+            App.tip = root.text;
+            App.tip-x = self.absolute-position.x + self.width + 8px;
+            App.tip-y = self.absolute-position.y + self.height / 2;
+            App.tip-above = false;
+        } else if App.tip == root.text {
+            App.tip = "";
+        }
+    }
 }
 
 // Навбар — сам TouchArea: так известно, что курсор над ним, и видна кнопка «Свернуть сайдбар».
@@ -129,6 +141,17 @@ export component Navbar inherits TouchArea {
             pin-ta := TouchArea {
                 mouse-cursor: MouseCursor.pointer;
                 clicked => { App.open-pin(i); }
+            }
+            property <bool> tip-hot: c && pin-ta.has-hover;
+            changed tip-hot => {
+                if self.tip-hot {
+                    App.tip = pin.title;
+                    App.tip-x = self.absolute-position.x + self.width + 8px;
+                    App.tip-y = self.absolute-position.y + self.height / 2;
+                    App.tip-above = false;
+                } else if App.tip == pin.title {
+                    App.tip = "";
+                }
             }
             Icon {
                 x: parent.width - 32px;
