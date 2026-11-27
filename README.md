@@ -32,8 +32,7 @@
 
 ## Отличия форка
 
-Windows-версия этого форка развивается в ветке `windows-player`. Ветка `main` служит зеркалом
-авторского проекта. Ниже перечислены отличия от [yamusic-rs v1.1.10](https://github.com/SpolzerMod/yamusic-rs/tree/v1.1.10).
+Форк развивается в ветке `main`. Ниже перечислены отличия от [yamusic-rs v1.1.10](https://github.com/SpolzerMod/yamusic-rs/tree/v1.1.10).
 
 - **Аудиовыход.** Обе версии используют WASAPI в общем режиме и подхватывают смену устройства
   по умолчанию в Windows. Форк добавляет выбор ASIO-драйвера в настройках. Между WASAPI и ASIO
@@ -364,7 +363,7 @@ RS бесплатный и без рекламы. Если он вам приг�
 Нужен Rust 1.95 или новее (`rustup update stable`). Дальше на любой системе одинаково:
 
 ```bash
-git clone --branch windows-player https://github.com/ilkruglov/yamusic-rs
+git clone https://github.com/ilkruglov/yamusic-rs
 cd yamusic-rs
 cargo build --release
 ```
@@ -497,7 +496,7 @@ Copyright © 2026 Spolzer. Код распространяется по лице
 
 ## English
 
-This fork's Windows player lives on `windows-player`. Compared with upstream v1.1.10, it adds
+This fork is developed on `main`. Compared with upstream v1.1.10, it adds
 live WASAPI/ASIO switching and prefers FLAC for playback at the highest quality setting.
 See the [fork differences](#отличия-форка) and [ASIO build instructions](#сборка).
 
