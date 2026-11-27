@@ -110,7 +110,12 @@ extern "C" void ya_asio_close(Output* s) {
     delete s;
 }
 
-extern "C" const char* ya_asio_open(const wchar_t* id, Output** out, unsigned* rate, unsigned short* channels, unsigned* frames) {
+struct StreamFormat {
+    unsigned rate, original_rate, frames, output_latency;
+    unsigned short channels;
+};
+
+extern "C" const char* ya_asio_open(const wchar_t* id, unsigned requested, Output** out, StreamFormat* format) {
     std::unique_ptr<Output, decltype(&ya_asio_close)> state(new(std::nothrow) Output(), ya_asio_close);
     auto* s = state.get();
     if (!s) return "out of memory";
@@ -128,8 +133,17 @@ extern "C" const char* ya_asio_open(const wchar_t* id, Output** out, unsigned* r
     if (!s->window || !s->driver->init(s->window)) return "ASIO driver initialization failed";
     long inputs, outputs, min, max, granularity;
     double hz = 0;
+    const auto read_rate = [&] {
+        return s->driver->getSampleRate(&hz) == ASE_OK && hz >= 8000 && hz <= 1536000;
+    };
+    if (read_rate()) format->original_rate = static_cast<unsigned>(hz);
+    if (requested && requested != format->original_rate && s->driver->canSampleRate(requested) == ASE_OK) {
+        // До создания буферов: от частоты зависят их размер и доступные каналы.
+        s->driver->setSampleRate(requested);
+    }
+    // Даже при отказе или внешнем тактировании микшеру нужна реальная частота.
+    if (!read_rate()) return "invalid sample rate";
     if (s->driver->getChannels(&inputs, &outputs) != ASE_OK || outputs < 1) return "no output channels";
-    if (s->driver->getSampleRate(&hz) != ASE_OK || !(hz >= 8000 && hz <= 1536000)) return "invalid sample rate";
     if (s->driver->getBufferSize(&min, &max, &s->frames, &granularity) != ASE_OK ||
         s->frames < 1 || s->frames > 1048576) return "invalid buffer size";
     s->sample_rate = hz;
@@ -152,9 +166,12 @@ extern "C" const char* ya_asio_open(const wchar_t* id, Output** out, unsigned* r
             memset(half, 0, size_t(width(s->formats[i])) * s->frames);
         }
     s->output_ready = s->driver->outputReady() == ASE_OK;
-    *rate = static_cast<unsigned>(hz);
-    *channels = static_cast<unsigned short>(s->channels);
-    *frames = static_cast<unsigned>(s->frames);
+    long input_latency = 0, output_latency = 0;
+    format->output_latency = s->driver->getLatencies(&input_latency, &output_latency) == ASE_OK && output_latency >= 0
+        ? static_cast<unsigned>(output_latency) : static_cast<unsigned>(s->frames * 2);
+    format->rate = static_cast<unsigned>(hz);
+    format->channels = static_cast<unsigned short>(s->channels);
+    format->frames = static_cast<unsigned>(s->frames);
     *out = state.release();
     return nullptr;
 }

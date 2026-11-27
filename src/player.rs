@@ -369,7 +369,7 @@ impl Output {
         }
     }
 
-    fn track_sink(&self, track: impl rodio::Source<Item = f32> + Send + 'static, volume: f32) -> Result<Sink, String> {
+    fn track_sink(&mut self, track: impl rodio::Source<Item = f32> + Send + 'static, volume: f32) -> Result<Sink, String> {
         match self {
             Self::System { stream, .. } => {
                 let sink = stream.sink();
@@ -431,13 +431,13 @@ fn system_device() -> Option<rodio::cpal::platform::WasapiDevice> {
     }
 }
 
-fn open_output(asio_driver: Option<&str>) -> Result<Output, String> {
+fn open_output(asio_driver: Option<&str>, rate: Option<u32>) -> Result<Output, String> {
     #[cfg(all(windows, feature = "asio"))]
     if let Some(name) = asio_driver {
-        return crate::asio::Stream::open(name).map(Output::Asio);
+        return crate::asio::Stream::open(name, rate).map(Output::Asio);
     }
     #[cfg(not(all(windows, feature = "asio")))]
-    let _ = asio_driver;
+    let _ = (asio_driver, rate);
     #[cfg(windows)]
     {
         open_system_output(None)
@@ -801,6 +801,7 @@ struct Engine {
     eq: Arc<EqParams>,
     asio_driver: Option<String>,
     audio: Option<Output>,
+    track_rate: Option<u32>,
     sink: Option<Sink>,
     position_base: Duration,
     #[cfg(windows)]
@@ -895,6 +896,7 @@ impl Engine {
             eq,
             asio_driver,
             audio: None,
+            track_rate: None,
             sink: None,
             position_base: Duration::ZERO,
             #[cfg(windows)]
@@ -952,7 +954,13 @@ impl Engine {
 
     fn run(mut self, rx: Receiver<Msg>) {
         loop {
-            match self.tx.recv(&rx, Duration::from_millis(200)) {
+            let timeout = Duration::from_millis(200);
+            #[cfg(all(windows, feature = "asio"))]
+            let timeout = match &self.audio {
+                Some(Output::Asio(s)) if self.loaded && !self.paused && s.draining() => Duration::from_millis(5),
+                _ => timeout,
+            };
+            match self.tx.recv(&rx, timeout) {
                 Ok(msg) => {
                     self.handle(msg);
                     self.sync();
@@ -975,15 +983,43 @@ impl Engine {
         self.sink.as_ref()
     }
 
-    fn ensure_audio(&mut self) -> Result<(), String> {
-        if self.audio.is_none() {
-            let output = open_output(self.asio_driver.as_deref());
-            #[cfg(windows)]
-            let output = if self.loaded && self.asio_driver.is_some() {
-                output.or_else(|_| open_system_output(None))
-            } else { output };
-            self.audio = Some(output?);
+    fn ensure_audio(&mut self, rate: Option<u32>) -> Result<(), String> {
+        #[cfg(windows)]
+        let recovering = self.loaded || self.audio.is_some();
+        #[cfg(all(windows, feature = "asio"))]
+        if rate != self.track_rate && matches!(&self.audio, Some(Output::Asio(s)) if Some(s.sample_rate()) != rate) {
+            self.fading = None;
+            self.sink = None;
+            self.audio = None;
         }
+        #[cfg(all(windows, feature = "asio"))]
+        if matches!(self.audio, Some(Output::System { .. })) && self.asio_driver.is_some() {
+            // После автоматического перехода на WASAPI повторяем попытку между треками.
+            // Во время кроссфейда системный поток ещё играет предыдущий трек.
+            if self.sink.is_none() && self.fade_in.is_zero() {
+                if let Ok(output) = open_output(self.asio_driver.as_deref(), rate) {
+                    self.audio = Some(output);
+                    self.sh().audio_output_error = None;
+                }
+            }
+        }
+        if self.audio.is_none() {
+            self.audio = Some(match open_output(self.asio_driver.as_deref(), rate) {
+                #[cfg(windows)]
+                Err(error) if recovering && self.asio_driver.is_some() => {
+                    let system = open_system_output(None)
+                        .map_err(|e| format!("{error}. Системный выход недоступен: {e}"))?;
+                    self.output_error(format!("{error}. Используется системный выход"));
+                    system
+                }
+                output => {
+                    let output = output?;
+                    self.sh().audio_output_error = None;
+                    output
+                }
+            });
+        }
+        self.track_rate = rate;
         Ok(())
     }
 
@@ -1011,18 +1047,24 @@ impl Engine {
         Fade::new(Ahead::new(eq, rate), fade_in, self.fade_out.clone())
     }
 
+    fn next_decoder(&self) -> Option<&Decoded> {
+        let (key, (_, decoder, _)) = self.prefetch.as_ref()?;
+        key.matches(&self.queue.front()?.id).then_some(decoder)
+    }
+
     /// Пора ли начать кроссфейд: до конца трека осталось его время и следующий трек уже скачан.
     fn crossfade_due(&self) -> bool {
         if self.crossfade.is_zero() || !self.loaded || self.paused || self.fading.is_some() || self.active_repeat() == Repeat::One {
             return false;
         }
-        let next_ready = match (self.queue.front(), &self.prefetch) {
-            (Some(next), Some((key, _))) => key.matches(&next.id),
-            _ => false,
-        };
+        let Some(next) = self.next_decoder() else { return false };
+        #[cfg(all(windows, feature = "asio"))]
+        if matches!(self.audio, Some(Output::Asio(_))) && self.track_rate != Some(next.sample_rate()) { return false; }
+        #[cfg(not(all(windows, feature = "asio")))]
+        let _ = next;
         let fade = self.crossfade.as_secs_f32();
         let duration = self.sh().duration;
-        next_ready && duration > 3.0 * fade && duration - self.pos() <= fade
+        duration > 3.0 * fade && duration - self.pos() <= fade
     }
 
     /// Прошлый трек уходит в отдельный звуковой поток и затухает, а следующий начинается в новом.
@@ -1056,7 +1098,8 @@ impl Engine {
             }
         }
         let track = self.source(decoder, fade_in);
-        let sink = self.audio.as_ref().ok_or("Аудиовыход недоступен")?.track_sink(track, self.gain())?;
+        let gain = self.gain();
+        let sink = self.audio.as_mut().ok_or("Аудиовыход недоступен")?.track_sink(track, gain)?;
         self.sink = None;
         if !self.paused {
             sink.play();
@@ -1108,8 +1151,9 @@ impl Engine {
             Some(Output::System { device, .. }) => Some(device.clone()),
             _ => None,
         };
+        let rate = self.track_rate.filter(|_| self.loaded);
         self.detach_output();
-        match self.open_at_position(open_output(driver.as_deref())) {
+        match self.open_at_position(open_output(driver.as_deref(), rate)) {
             Ok(()) => {
                 self.asio_driver = driver;
                 self.sh().audio_output_error = None;
@@ -1118,7 +1162,7 @@ impl Engine {
                 self.audio = None;
                 let old = self.asio_driver.clone();
                 let restored_old = manual && old.is_some() && old != driver
-                    && self.open_at_position(open_output(old.as_deref())).is_ok();
+                    && self.open_at_position(open_output(old.as_deref(), rate)).is_ok();
                 if !restored_old && (self.loaded || !self.paused || old.is_none()) {
                     self.audio = None;
                     match self.open_at_position(open_system_output(if manual { previous_system.clone() } else { None })) {
@@ -1532,6 +1576,12 @@ impl Engine {
                         self.begin_listen(&t, false);
                     }
                     return;
+                }
+            }
+            #[cfg(all(windows, feature = "asio"))]
+            if self.next_decoder().map(|source| source.sample_rate()) != self.track_rate {
+                if let Some(Output::Asio(stream)) = &mut self.audio {
+                    if !stream.tail_played() { return; }
                 }
             }
             self.advance(End::Finished);
@@ -2362,7 +2412,7 @@ impl Engine {
             self.sh().loading = false;
             return;
         }
-        if let Err(e) = self.ensure_audio() {
+        if let Err(e) = self.ensure_audio(Some(src.sample_rate())) {
             self.paused = true;
             self.sh().loading = false;
             self.output_error(e);
@@ -2373,7 +2423,6 @@ impl Engine {
             self.on_load_error(e);
             return;
         }
-        self.sh().audio_output_error = None;
         self.loaded = true;
         self.errors_in_row = 0;
         self.sh().loading = false;
@@ -2406,13 +2455,12 @@ impl Engine {
             if let Some(l) = &mut self.listen { l.go(); }
         } else if let Some(buf) = self.current_buf.clone() {
             if self.loaded {
-                if let Err(e) = self.ensure_audio().and_then(|_| self.attach(buf, self.position_base)) {
+                if let Err(e) = self.ensure_audio(self.track_rate).and_then(|_| self.attach(buf, self.position_base)) {
                     self.pause();
                     self.audio = None;
                     self.output_error(e);
-                } else {
-                    self.sh().audio_output_error = None;
-                    if let Some(l) = &mut self.listen { l.go(); }
+                } else if let Some(l) = &mut self.listen {
+                    l.go();
                 }
             } else {
                 let format = self.sh().format.clone();
@@ -3017,7 +3065,7 @@ mod tests {
     #[test]
     fn missing_asio_driver_returns_an_error() {
         let name = "yamusic-rs test ASIO driver that cannot be registered under this name";
-        let Err(error) = open_output(Some(name)) else {
+        let Err(error) = open_output(Some(name), None) else {
             panic!("an unavailable ASIO driver opened an audio stream");
         };
         assert!(error.contains(name));
@@ -3187,6 +3235,7 @@ mod tests {
         wait_for_audio(&engine, before);
         let Some(Output::Asio(stream)) = engine.audio.as_mut() else { panic!("expected ASIO"); };
         let start = Instant::now();
+        assert_eq!(stream.sample_rate(), Decoded::open(buf.reader()).unwrap().sample_rate());
         let initial = stream.callback_count();
         while start.elapsed() < Duration::from_secs(5) {
             thread::sleep(Duration::from_millis(250));
@@ -3247,6 +3296,77 @@ mod tests {
         engine.change_output(Some(name), true);
         assert!(matches!(engine.audio, Some(Output::Asio(_))));
         check_crossfade_and_reopen(&mut engine, &buf);
+    }
+
+    #[cfg(all(windows, feature = "asio"))]
+    #[test]
+    #[ignore = "requires a free Cayin ASIO driver"]
+    fn asio_finishes_before_switching_track_rate() {
+        let name = std::env::var("YAMUSIC_TEST_ASIO").unwrap();
+        let cd = Buf::from_bytes(include_bytes!("../tests/fixtures/silence-44100.flac"));
+        let studio = Buf::from_bytes(include_bytes!("../tests/fixtures/native.flac"));
+        let audio = |buf: &Arc<Buf>| (buf.clone(), Decoded::open(buf.reader()).unwrap(), "FLAC".into());
+        let mut engine = test_engine(Some(name));
+        engine.paused = false;
+        engine.play_loaded(audio(&cd));
+        for (i, (old, new, buf)) in [(44100, 48000, &studio), (48000, 44100, &cd)].into_iter().enumerate() {
+            assert_eq!(engine.audio.as_ref().unwrap().sample_rate(), old);
+            let id = (i + 2).to_string();
+            let track = crate::api::parse_track(&serde_json::json!({"id": id, "title": "next", "durationMs": 340})).unwrap();
+            engine.queue.push_back(track);
+            engine.prefetch = Some((PrefetchKey { id: id.clone(), quality: crate::api::QUALITY.load(std::sync::atomic::Ordering::Relaxed) }, audio(buf)));
+            engine.crossfade = Duration::from_millis(80);
+            // Длительность в метаданных уже допускает наложение, а звук ещё играет.
+            engine.sh().duration = 0.35;
+            engine.position_base = Duration::from_millis(290);
+            assert!(!engine.crossfade_due(), "overlap would truncate the old rate");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !engine.sink().unwrap().empty() {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+            engine.tick();
+            assert_ne!(engine.current.as_ref().unwrap().id, id);
+            assert!(matches!(&engine.audio, Some(Output::Asio(s)) if s.draining()));
+            while engine.current.as_ref().unwrap().id != id {
+                engine.tick();
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(engine.fading.is_none());
+            assert_eq!(engine.audio.as_ref().unwrap().sample_rate(), new);
+            eprintln!("ASIO {old} -> {new} Hz");
+        }
+        // Драйвер Cayin не поддерживает эту частоту. Два таких трека и перемотка
+        // используют тот же поток с пересчётом на фактическую частоту устройства.
+        let odd = Buf::from_bytes(include_bytes!("../tests/fixtures/silence-37013.flac"));
+        engine.play_loaded(audio(&odd));
+        assert_eq!(engine.track_rate, Some(37013));
+        let rate = engine.audio.as_ref().unwrap().sample_rate();
+        assert_eq!(rate, 44100);
+        wait_for_audio(&engine, 0.0);
+        let callbacks = |e: &Engine| match e.audio.as_ref().unwrap() {
+            Output::Asio(s) => s.callback_count(),
+            _ => panic!("expected ASIO"),
+        };
+        let count = callbacks(&engine);
+        engine.play_loaded(audio(&odd));
+        engine.seek(Duration::from_millis(100));
+        assert!(callbacks(&engine) >= count && count > 0);
+        eprintln!("ASIO 37013 Hz -> {rate} Hz, использован действующий поток");
+
+        // Отказ при смене частоты виден пользователю. Когда драйвер вернётся,
+        // следующий трек откроет его с частотой декодера.
+        let preferred = engine.asio_driver.replace("yamusic absent device".into());
+        engine.stop_audio();
+        engine.play_loaded(audio(&studio));
+        assert!(matches!(engine.audio, Some(Output::System { .. })));
+        assert!(engine.sh().audio_output_error.as_ref().is_some_and(|(msg, _)| msg.contains("системный выход")));
+        engine.asio_driver = preferred;
+        engine.stop_audio();
+        engine.play_loaded(audio(&studio));
+        assert!(matches!(engine.audio, Some(Output::Asio(ref s)) if s.sample_rate() == 48000));
+        assert!(engine.sh().audio_output_error.is_none());
     }
 
     /// Сетевой тест: ссылка на поток → скачивание → декодирование (без токена — 30-сек превью).

@@ -5,18 +5,23 @@ use rodio::{Sink, Source};
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
 
+#[derive(Default)]
+#[repr(C)]
+struct StreamFormat {
+    rate: u32,
+    original_rate: u32,
+    frames: u32,
+    output_latency: u32,
+    channels: u16,
+}
+
 unsafe extern "C" {
-    fn ya_asio_open(
-        id: *const u16,
-        out: *mut *mut c_void,
-        rate: *mut u32,
-        channels: *mut u16,
-        frames: *mut u32,
-    ) -> *const c_char;
+    fn ya_asio_open(id: *const u16, requested: u32, out: *mut *mut c_void, format: *mut StreamFormat) -> *const c_char;
     fn ya_asio_start(
         handle: *mut c_void,
         ctx: *mut c_void,
@@ -89,8 +94,35 @@ pub(crate) struct Stream {
     render_state: Box<UnsafeCell<RenderBuffers>>,
     controller: Arc<DynamicMixerController<f32>>,
     rate: u32,
+    rendered: Arc<AtomicU32>,
+    drain_blocks: u32,
+    drain: Option<TailProgress>,
+    idle_limit: Duration,
     callbacks: u32,
     last_callback: Instant,
+}
+
+struct TailProgress {
+    start: u32,
+    last: u32,
+    last_change: Instant,
+}
+
+impl TailProgress {
+    fn played(
+        drain: &mut Option<Self>, count: u32, required: u32, now: Instant, idle_limit: Duration,
+    ) -> bool {
+        let progress = drain.get_or_insert(Self { start: count, last: count, last_change: now });
+        if count != progress.last {
+            progress.last = count;
+            progress.last_change = now;
+        }
+        if count.wrapping_sub(progress.start) < required && now - progress.last_change < idle_limit {
+            return false;
+        }
+        *drain = None;
+        true
+    }
 }
 
 struct Mixer {
@@ -115,7 +147,10 @@ impl Mixer {
 }
 
 // Декодер может ждать сеть. Вызов драйвера берёт только готовый блок или выдаёт тишину.
+const MIX_BLOCKS: u32 = 2;
+
 struct RenderBuffers {
+    rendered: Arc<AtomicU32>,
     channels: usize,
     rate: u32,
     ready: mpsc::Receiver<Box<[f32]>>,
@@ -126,9 +161,9 @@ impl RenderBuffers {
     fn new(mut mixer: Mixer, samples: usize) -> std::io::Result<Self> {
         let channels = usize::from(mixer.channels);
         let rate = mixer.stereo.sample_rate();
-        let (free, spare) = mpsc::sync_channel(2);
-        let (filled, ready) = mpsc::sync_channel(2);
-        for _ in 0..2 {
+        let (free, spare) = mpsc::sync_channel(MIX_BLOCKS as usize);
+        let (filled, ready) = mpsc::sync_channel(MIX_BLOCKS as usize);
+        for _ in 0..MIX_BLOCKS {
             free.send(vec![0.0; samples].into_boxed_slice()).unwrap();
         }
         std::thread::Builder::new().name("asio-mix".into()).spawn(move || {
@@ -137,7 +172,7 @@ impl RenderBuffers {
                 if filled.send(block).is_err() { break; }
             }
         })?;
-        Ok(Self { ready, free, channels, rate })
+        Ok(Self { ready, free, channels, rate, rendered: Arc::default() })
     }
 
     fn fill(&mut self, out: &mut [f32]) {
@@ -146,6 +181,7 @@ impl RenderBuffers {
                 out.copy_from_slice(&block);
                 // Из двух заранее выделенных блоков один сейчас у нас.
                 let _ = self.free.try_send(block);
+                self.rendered.fetch_add(1, Ordering::Relaxed);
             }
             Err(_) => out.fill(0.0),
         }
@@ -206,7 +242,7 @@ fn track_sink(
 }
 
 impl Stream {
-    pub(crate) fn open(name: &str) -> Result<Self, String> {
+    pub(crate) fn open(name: &str, requested: Option<u32>) -> Result<Self, String> {
         let fail = |why: &str| format!("Не удалось открыть ASIO-драйвер «{name}»: {why}");
         let drivers = drivers();
         let (_, clsid) = choices(&drivers)
@@ -219,18 +255,44 @@ impl Stream {
             })
             .ok_or_else(|| fail("драйвер не найден или требует повторного выбора"))?;
         let id: Vec<_> = clsid.encode_utf16().chain([0]).collect();
-        let (mut handle, mut rate, mut channels, mut frames) = (std::ptr::null_mut(), 0, 0, 0);
-        let error = unsafe { ya_asio_open(id.as_ptr(), &mut handle, &mut rate, &mut channels, &mut frames) };
-        if !error.is_null() {
-            return Err(fail(&unsafe { CStr::from_ptr(error) }.to_string_lossy()));
+        let mut format = StreamFormat::default();
+        let requested = requested.unwrap_or(0);
+        let stream = Self::start(&id, requested, &mut format).or_else(|error| {
+            // Флаг поддержки частоты ещё не гарантирует, что на ней запустятся буферы.
+            if requested != 0 && format.original_rate != 0 && format.original_rate != requested {
+                let old = format.original_rate;
+                Self::start(&id, old, &mut StreamFormat::default())
+                    .map_err(|retry| format!("{error}; {old} Hz: {retry}"))
+            } else {
+                Err(error)
+            }
+        }).map_err(|e| fail(&e))?;
+        if requested != 0 && stream.rate != requested {
+            crate::config::log(format!("ASIO «{name}»: трек {requested} Гц, драйвер {} Гц", stream.rate));
         }
-        let handle = Handle(NonNull::new(handle).ok_or_else(|| fail("нет устройства"))?);
+        Ok(stream)
+    }
+
+    fn start(id: &[u16], requested: u32, format: &mut StreamFormat) -> Result<Self, String> {
+        let mut handle = std::ptr::null_mut();
+        let error = unsafe { ya_asio_open(id.as_ptr(), requested, &mut handle, format) };
+        if !error.is_null() {
+            return Err(unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned());
+        }
+        let handle = Handle(NonNull::new(handle).ok_or("нет устройства")?);
+        let StreamFormat { rate, channels, frames, output_latency, .. } = *format;
         let (controller, stereo) = mixer(2, rate);
         let buffers = RenderBuffers::new(Mixer { stereo, channels }, frames as usize * usize::from(channels))
-            .map_err(|e| fail(&e.to_string()))?;
+            .map_err(|e| e.to_string())?;
         let stream = Self {
             handle,
             controller,
+            rendered: buffers.rendered.clone(),
+            // Последний блок микшера может ещё быть в очереди. После его передачи
+            // ждём задержку драйвера и один блок до последнего сэмпла.
+            drain_blocks: MIX_BLOCKS + output_latency.div_ceil(frames) + 1,
+            drain: None,
+            idle_limit: Duration::from_secs_f64(3.0 * f64::from(frames) / f64::from(rate)).max(Duration::from_secs(3)),
             render_state: Box::new(UnsafeCell::new(buffers)),
             rate,
             callbacks: 0,
@@ -238,7 +300,7 @@ impl Stream {
         };
         let ctx = stream.render_state.get().cast();
         if !unsafe { ya_asio_start(stream.handle.0.as_ptr(), ctx, render) } {
-            return Err(fail("ASIOStart"));
+            return Err("ASIOStart".into());
         }
         Ok(stream)
     }
@@ -247,11 +309,21 @@ impl Stream {
         self.rate
     }
 
+    pub(crate) fn draining(&self) -> bool { self.drain.is_some() }
+
+    pub(crate) fn tail_played(&mut self) -> bool {
+        TailProgress::played(
+            &mut self.drain, self.rendered.load(Ordering::Relaxed), self.drain_blocks,
+            Instant::now(), self.idle_limit,
+        )
+    }
+
     pub(crate) fn sink(
-        &self,
+        &mut self,
         track: impl Source<Item = f32> + Send + 'static,
         volume: f32,
     ) -> Sink {
+        self.drain = None;
         track_sink(&self.controller, self.rate, track, volume)
     }
 
@@ -267,13 +339,29 @@ impl Stream {
             self.callbacks = count;
             self.last_callback = Instant::now();
         }
-        reset || self.last_callback.elapsed() > Duration::from_secs(3)
+        reset || self.last_callback.elapsed() > self.idle_limit
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draining_waits_for_progress_and_releases_the_fast_poll() {
+        let start = Instant::now();
+        let idle = Duration::from_secs(3);
+        let mut drain = None;
+        for step in 0..5 {
+            let count = (u32::MAX - 2).wrapping_add(step);
+            assert!(!TailProgress::played(&mut drain, count, 5, start + Duration::from_secs(2 * u64::from(step)), idle));
+        }
+        assert!(TailProgress::played(&mut drain, 2, 5, start + Duration::from_secs(10), idle));
+        assert!(drain.is_none());
+        assert!(!TailProgress::played(&mut drain, 3, 5, start, idle));
+        assert!(TailProgress::played(&mut drain, 3, 5, start + idle, idle));
+        assert!(drain.is_none());
+    }
 
     #[test]
     fn both_stereo_channels_reach_a_mono_device_and_stereo_stays_separate() {
