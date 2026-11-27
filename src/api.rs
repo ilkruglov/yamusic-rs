@@ -122,6 +122,11 @@ pub fn pic(uri: &str, size: u32) -> String {
     // get-music-misc отдаёт только эти размеры, на остальные — 404.
     let size = if uri.contains("/get-music-misc/") {
         [30, 40, 50, 75, 80, 100, 150, 160, 200, 300, 400, 460, 600, 700, 800, 1000].into_iter().find(|&s| s >= size).unwrap_or(1000)
+    } else if uri.contains("/get-music-feed-promotion/") {
+        // У промо-картинок («Актуальное» в «Книгах и подкастах») нет 600x600 — 404, карточки
+        // оставались пустыми. Оригинал просит их в 400 и 800 для экрана с масштабом
+        // (`PromotionsCard`: size 400, srcset 2x).
+        if size <= 400 { 400 } else { 800 }
     } else {
         [50, 100, 200, 300, 400, 600, 1000].into_iter().find(|&s| s >= size).unwrap_or(1000)
     };
@@ -133,9 +138,14 @@ pub struct Named {
     pub id: String,
     pub name: String,
     pub cover: Option<String>,
-    /// Фото без фона: телефон ставит его над названием трека в «Моей волне».
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    /// Фото без фона: его ставят над названием трека в «Моей волне».
     pub cutout: Option<String>,
+    /// «Сборник» вместо исполнителя.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub various: bool,
+    /// Составной исполнитель («A & B») по частям: меню трека открывает их по отдельности.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub decomposed: Vec<Named>,
 }
 
 #[derive(Clone, Debug)]
@@ -151,6 +161,7 @@ pub struct Track {
     playlist_slot: Option<Box<PlaylistSlot>>,
     /// Позиция в исходном списке при воспроизведении. У ручной вставки её нет.
     pub(crate) list_position: Option<usize>,
+    pub(crate) returned_to_queue: bool,
     pub id: String,
     pub album_id: Option<String>,
     pub title: String,
@@ -160,8 +171,13 @@ pub struct Track {
     pub artist_list: Vec<Named>,
     pub duration_ms: u64,
     pub cover: Option<String>,
+    /// Фото без фона, выпущенное к самому релизу (`cutoutCover` трека); есть не у всех.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub cutout: Option<String>,
     pub explicit: bool,
     pub lyrics: bool,
+    /// Популярный трек альбома (`bests`): у оригинала молния в строке.
+    pub best: bool,
     pub color: Option<[u8; 3]>,
     /// Для тегов скачанного файла: альбом, год, номер трека.
     pub album_title: String,
@@ -174,6 +190,8 @@ pub struct Track {
     pub mood: Option<Mood>,
     /// `type` трека: music, podcast-episode, audiobook, fairy-tale… Пусто — music.
     pub kind: String,
+    /// Первый трек тома в альбоме из нескольких томов: номер диска для заголовка «Диск N».
+    pub disk: Option<u32>,
 }
 
 /// `trackParameters` из ответа API.
@@ -211,6 +229,17 @@ impl Track {
 
     pub fn cover_url(&self, size: u32) -> Option<String> {
         self.cover.as_deref().map(|c| pic(c, size))
+    }
+
+    /// Фото над названием в «Моей волне», как у `VibePage` оригинала: только при главном
+    /// исполнителе (первом), сначала фото релиза, иначе фото этого исполнителя. Размер `orig`,
+    /// как у оригинала (`size: "orig"`): это кадр 5:4 с прозрачными краями, а квадратный
+    /// размер сервер обрезает по бокам.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub fn cutout_url(&self) -> Option<String> {
+        let main = self.artist_list.first()?;
+        let uri = self.cutout.as_deref().or(main.cutout.as_deref())?;
+        Some(format!("https://{}", uri.trim_start_matches("https://").replace("%%", "orig")))
     }
 }
 
@@ -442,6 +471,8 @@ pub struct Account {
 
 #[derive(Clone)]
 pub struct Api {
+    #[cfg(test)]
+    test_base: Option<String>,
     http: Client,
     token: String,
 }
@@ -468,21 +499,23 @@ pub(crate) fn hex_color(v: Option<&Value>) -> Option<[u8; 3]> {
 }
 
 fn artists_of(v: &Value) -> Vec<Named> {
-    v.get("artists")
-        .and_then(|a| a.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| {
-                    Some(Named {
-                        id: s(x.get("id")).unwrap_or_default(),
-                        name: x.get("name")?.as_str()?.to_string(),
-                        cover: x.pointer("/cover/uri").and_then(|u| u.as_str()).map(String::from),
-                        cutout: x.pointer("/cutoutCover/uri").and_then(|u| u.as_str()).map(String::from),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    v.get("artists").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(named).collect()).unwrap_or_default()
+}
+
+fn named(x: &Value) -> Option<Named> {
+    // `decomposed` приходит парами «разделитель, исполнитель»: `[" & ", {…}, ", ", {…}]`;
+    // как у оригинала (модуль 53399), берётся исполнитель, перед которым стоит строка.
+    let decomposed = x.get("decomposed").and_then(|d| d.as_array()).map(|d| {
+        d.windows(2).filter(|w| w[0].is_string()).filter_map(|w| named(&w[1])).collect()
+    });
+    Some(Named {
+        id: s(x.get("id")).unwrap_or_default(),
+        name: x.get("name")?.as_str()?.to_string(),
+        cover: x.pointer("/cover/uri").and_then(|u| u.as_str()).map(String::from),
+        cutout: x.pointer("/cutoutCover/uri").and_then(|u| u.as_str()).map(String::from),
+        various: x.get("various").and_then(|v| v.as_bool()).unwrap_or(false),
+        decomposed: decomposed.unwrap_or_default(),
+    })
 }
 
 fn join_names(a: &[Named]) -> String {
@@ -581,6 +614,7 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
     Some(Track {
         playlist_slot: None,
         list_position: None,
+        returned_to_queue: false,
         id,
         album_id: album.and_then(|a| s(a.get("id"))),
         title,
@@ -589,9 +623,11 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
         artist_list,
         duration_ms: v.get("durationMs").and_then(|d| d.as_u64()).unwrap_or(0),
         cover: v.get("coverUri").and_then(|c| c.as_str()).map(String::from),
+        cutout: v.pointer("/cutoutCover/uri").and_then(|c| c.as_str()).map(String::from),
         explicit: v.get("contentWarning").and_then(|c| c.as_str()) == Some("explicit")
             || v.get("explicit").and_then(|c| c.as_bool()).unwrap_or(false),
         lyrics: flag("hasAvailableSyncLyrics") || flag("hasAvailableTextLyrics"),
+        best: album.and_then(|a| a.get("bests")).and_then(Value::as_array).is_some_and(|b| b.iter().any(|x| s(Some(x)) == s(v.get("id")))),
         color: hex_color(v.pointer("/derivedColors/average")),
         album_title: album.map(|a| str_of(a, "title")).unwrap_or_default(),
         year: album.and_then(|a| a.get("year")).and_then(|y| y.as_u64()).map(|y| y as u32),
@@ -599,7 +635,31 @@ pub(crate) fn parse_track(v: &Value) -> Option<Track> {
         batch_id: String::new(),
         mood: mood_of(v),
         kind: str_of(v, "type"),
+        disk: None,
     })
+}
+
+/// Треки всех томов альбома одним списком. Как `makeFlatVolumeItems` оригинала: заголовок
+/// «Диск N» стоит перед каждым томом, только если томов больше одного; номер —
+/// `albums[0].trackPosition.volume` первого трека тома.
+fn album_tracks(v: &Value) -> Vec<Track> {
+    let vols: Vec<&Vec<Value>> = v.get("volumes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_array).collect();
+    let bests: Vec<String> = v.get("bests").and_then(Value::as_array).into_iter().flatten().filter_map(|x| s(Some(x))).collect();
+    let mut tracks: Vec<Track> = Vec::new();
+    for (k, vol) in vols.iter().enumerate() {
+        let start = tracks.len();
+        tracks.extend(vol.iter().filter_map(parse_track).map(|mut t| {
+            t.best |= bests.contains(&t.id);
+            t
+        }));
+        if vols.len() > 1 {
+            if let Some(first) = tracks.get_mut(start) {
+                let number = vol.first().and_then(|t| t.pointer("/albums/0/trackPosition/volume")).and_then(Value::as_u64);
+                first.disk = Some(number.map_or(k as u32 + 1, |n| n as u32));
+            }
+        }
+    }
+    tracks
 }
 
 fn mood_of(v: &Value) -> Option<Mood> {
@@ -1152,8 +1212,104 @@ fn xml_tag<'a>(xml: &'a str, name: &str) -> Res<&'a str> {
     Ok(&xml[start..end])
 }
 
+/// Прямая ссылка `get-mp3` из XML download-info.
+fn direct_mp3(xml: &str) -> Res<String> {
+    let host = xml_tag(xml, "host")?;
+    let path = xml_tag(xml, "path")?;
+    let ts = xml_tag(xml, "ts")?;
+    let sg = xml_tag(xml, "s")?;
+    let digest = Md5::digest(format!("{MP3_SALT}{}{sg}", path.get(1..).unwrap_or("")).as_bytes());
+    let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("https://{host}/get-mp3/{hash}/{ts}{path}"))
+}
+
+/// Какой вариант download-info уже играет: докачка ищет его, а не выбирает качество заново.
+#[derive(PartialEq, Eq)]
+struct VariantKey {
+    codec: String,
+    bitrate: u64,
+    preview: bool,
+}
+
+fn variant_key(x: &Value) -> VariantKey {
+    VariantKey {
+        codec: x.get("codec").and_then(|c| c.as_str()).unwrap_or("mp3").to_string(),
+        bitrate: x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0),
+        preview: x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false),
+    }
+}
+
+fn find_variant<'a>(arr: &'a [Value], key: &VariantKey) -> Option<&'a Value> {
+    let mut matches = arr.iter().filter(|x| variant_key(x) == *key);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+/// Вариант под текущее качество: 0 — максимальный mp3, 1 — mp3 до 192, 2 — минимальный mp3.
+fn pick_variant(arr: &[Value], quality: u8) -> Option<&Value> {
+    let rank = |x: &&Value| {
+        (
+            !x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false),
+            x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0),
+        )
+    };
+    let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == Some("mp3"));
+    let full = |x: &&Value| !x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false);
+    let bitrate = |x: &&Value| x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0);
+    match quality {
+        2 => mp3().filter(full).min_by_key(bitrate),
+        1 => mp3().filter(full).filter(|x| bitrate(x) <= 192).max_by_key(bitrate),
+        _ => None,
+    }
+    .or_else(|| mp3().max_by_key(rank))
+    .or_else(|| arr.iter().max_by_key(rank))
+}
+
+/// Прямая ссылка на аудио и его формат («MP3 320»).
+/// Поле для повторной подписи скрыто: его читает только [`Api::stream_again`].
+pub struct StreamUrl {
+    pub url: String,
+    pub format: String,
+    again: Again,
+}
+
+enum Again {
+    /// Тот же вариант download-info.
+    Variant(VariantKey),
+    /// get-file-info с тем же качеством и одним кодеком.
+    File { quality: &'static str, codec: String },
+}
+
 fn short(s: &str) -> String {
     s.chars().take(200).collect()
+}
+
+/// Ключ волны в Коллекции, как у карты `library.vibes` оригинала: сиды без повторов, по
+/// порядку, через запятую.
+pub fn wave_key(seeds: &[String]) -> String {
+    let mut seeds: Vec<&str> = seeds.iter().map(String::as_str).collect();
+    seeds.sort_unstable();
+    seeds.dedup();
+    seeds.join(",")
+}
+
+/// Ответ `account/experiments/details` → имена экспериментов с группой `on`.
+fn experiments_on(v: &Value) -> std::collections::HashSet<String> {
+    v.as_object()
+        .map(|m| m.iter().filter(|(_, e)| e.get("group").and_then(|g| g.as_str()) == Some("on")).map(|(k, _)| k.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Ответ `collection/sync` → ключи волн из `likedWaves`.
+fn parse_liked_waves(v: &Value) -> Option<std::collections::HashSet<String>> {
+    let liked = v.pointer("/values/likedWaves/values/liked")?.as_array()?;
+    Some(
+        liked
+            .iter()
+            .filter_map(|w| w.get("seeds")?.as_array())
+            .map(|seeds| wave_key(&seeds.iter().filter_map(|s| s.as_str().map(String::from)).collect::<Vec<_>>()))
+            .collect(),
+    )
 }
 
 impl Api {
@@ -1165,7 +1321,16 @@ impl Api {
             .gzip(true)
             .build()
             .expect("http client");
-        Api { http, token: token.trim().to_string() }
+        Api {
+            http, token: token.trim().to_string(),
+            #[cfg(test)]
+            test_base: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn local_server(base: String) -> Self {
+        Self { test_base: Some(base), http: Client::builder().no_proxy().build().unwrap(), token: String::new() }
     }
 
     pub fn token(&self) -> &str {
@@ -1199,7 +1364,10 @@ impl Api {
         let url = if path_or_url.starts_with("https://") || path_or_url.starts_with("http://") {
             path_or_url.to_string()
         } else {
-            format!("{BASE}{path_or_url}")
+            let base = BASE;
+            #[cfg(test)]
+            let base = self.test_base.as_deref().unwrap_or(base);
+            format!("{base}{path_or_url}")
         };
         let trusted = reqwest::Url::parse(&url).is_ok_and(|u| token_allowed(&u));
         let mut rb = self
@@ -1420,6 +1588,37 @@ impl Api {
         }
     }
 
+    /// Включённые серверные эксперименты оригинала (`account/experiments/details`): имена с
+    /// группой `on`, как у `checkExperiment(имя, "on")`.
+    pub fn experiments_on(&self) -> Res<std::collections::HashSet<String>> {
+        let v = self.get_raw("/account/experiments/details")?;
+        Ok(experiments_on(&v))
+    }
+
+    /// Волны в Коллекции (ключи — `wave_key`): `collection/sync` только с `likedWaves`, как
+    /// `library.getData([LIKED_VIBES])` оригинала.
+    pub fn liked_waves(&self) -> Res<std::collections::HashSet<String>> {
+        let v = self.post_raw("/collection/sync", &json!({ "likedWaves": { "allValuesRequired": true } }))?;
+        parse_liked_waves(&v).ok_or_else(|| "в ответе нет likedWaves".into())
+    }
+
+    /// «Нравится» у волны: `collection/v1/waves/like` или `unlike`, сиды — без повторов и по
+    /// порядку, как в `library.toggleVibeLike` оригинала.
+    pub fn like_wave(&self, seeds: &[String], like: bool) -> Res<()> {
+        let path = if like { "/collection/v1/waves/like" } else { "/collection/v1/waves/unlike" };
+        let key = wave_key(seeds);
+        let seeds: Vec<&str> = key.split(',').collect();
+        self.post_raw(path, &json!({ "waves": [{ "seeds": seeds }] })).map(|_| ())
+    }
+
+    /// «Поделиться» волной: `PUT wave/v1/shares` с сидами отдаёт `shareId`, ссылка —
+    /// `/myvibe/<shareId>` на сайте Музыки, как у `ShareVibeMenuItem` оригинала.
+    pub fn share_wave(&self, seeds: &[String]) -> Res<String> {
+        let v = self.send_raw(self.desktop_req(Method::PUT, "/wave/v1/shares").json(&json!({ "seeds": seeds })))?;
+        let id = s(v.get("shareId")).ok_or("в ответе нет shareId")?;
+        Ok(format!("https://music.yandex.ru/myvibe/{id}"))
+    }
+
     /// Лайк альбома или исполнителя: `kind` — albums или artists.
     pub fn like_entity(&self, uid: &str, kind: &str, id: &str, remove: bool) -> Res<()> {
         let action = if remove { "remove" } else { "add-multiple" };
@@ -1435,6 +1634,52 @@ impl Api {
     /// Всё содержимое блока лендинга, как на странице `entities` оригинала: первая страница, 100 карточек.
     pub fn block_entities(&self, id: &str) -> Res<Vec<Card>> {
         Ok(cards(&self.get_raw(&format!("/landing/block/{id}/entities?page=0&pageSize=100"))?))
+    }
+
+    /// Подкатегория подкастов (`/non-music/category/<id>/albums`): название и подкасты.
+    pub fn nonmusic_category(&self, id: &str) -> Res<(String, Vec<Card>)> {
+        let v = self.get_raw(&format!("/non-music/category/{id}/albums"))?;
+        let ids: Vec<String> = v.get("albums").and_then(|a| a.as_array()).into_iter().flatten().filter_map(|x| s(Some(x))).collect();
+        let mut cards = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(100) {
+            let v = self.get("/albums", &[("album-ids", &chunk.join(","))])?;
+            cards.extend(v.as_array().into_iter().flatten().filter_map(parse_album).map(|a| album_card(&a)));
+        }
+        Ok((str_of(&v, "title"), cards))
+    }
+
+    /// «Моя полка» (`/collection/shelf` оригинала): недавно прослушанное и отложенное.
+    pub fn bookshelf(&self) -> Res<Vec<(String, Vec<Card>)>> {
+        ["recently-played", "liked"]
+            .iter()
+            .map(|part| {
+                let v = self.get_raw(&format!("/non-music/bookshelf/{part}"))?;
+                let cards = v
+                    .get("entities")
+                    .and_then(|e| e.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| parse_album(e.get("album")?))
+                    .map(|a| album_card(&a))
+                    .collect();
+                Ok((str_of(&v, "title"), cards))
+            })
+            .collect()
+    }
+
+    /// «Новые выпуски» с полки: выпуски из блоков `non-music/new-episodes`.
+    pub fn new_episodes(&self) -> Res<(String, Vec<Track>)> {
+        let v = self.get_raw("/non-music/new-episodes")?;
+        let tracks = v
+            .get("blocks")
+            .and_then(|b| b.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|b| b.get("entities")?.as_array())
+            .flatten()
+            .filter_map(|e| parse_track(e.get("track")?))
+            .collect();
+        Ok((str_of(&v, "title"), tracks))
     }
 
     /// Подборка (`/tag/autumn`): название тега и его плейлисты, как TagPage оригинала —
@@ -1471,6 +1716,13 @@ impl Api {
         } else {
             tabs(&v, "playlist", parse_playlist).into_iter().map(|(t, p)| (t, p.iter().map(playlist_card).collect())).collect()
         })
+    }
+
+    /// Вкладки «Мои плейлисты» самими плейлистами: на телефоне их сортируют по дате и названию.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn collection_playlists(&self) -> Res<Vec<(String, Vec<Playlist>)>> {
+        let v = self.get_raw("/landing-blocks/collection/playlists-liked-and-playlists-created?count=500")?;
+        Ok(tabs(&v, "playlist", parse_playlist))
     }
 
     /// Все альбомы исполнителя: path — discography-albums (студийные), direct-albums или also-albums (сборники).
@@ -1884,12 +2136,7 @@ impl Api {
     pub fn album(&self, id: &str) -> Res<(Album, Vec<Track>)> {
         let v = self.get(&format!("/albums/{id}/with-tracks"), &[])?;
         let album = parse_album(&v).ok_or("нет данных об альбоме")?;
-        let tracks = v
-            .get("volumes")
-            .and_then(|x| x.as_array())
-            .map(|vols| vols.iter().filter_map(|d| d.as_array()).flatten().filter_map(parse_track).collect())
-            .unwrap_or_default();
-        Ok((album, tracks))
+        Ok((album, album_tracks(&v)))
     }
 
     pub fn playlist(&self, uid: &str, kind: &str) -> Res<(Playlist, Vec<Track>)> {
@@ -2068,50 +2315,85 @@ impl Api {
 
     // ---------- аудио ----------
 
+    pub(crate) fn stream_url(&self, track_id: &str, quality: u8) -> Res<StreamUrl> {
+        if quality == 0 {
+            match self.flac_stream(track_id) {
+                Ok(Some(link)) => return Ok(link),
+                Ok(None) => {}
+                Err(e) => crate::config::log(format!("FLAC {track_id}: {e}")),
+            }
+        }
+        self.lossy_stream(track_id, quality)
+    }
+
     /// Прямая ссылка на аудио и его формат («MP3 320»): сначала download-info (mp3 до 320),
-    /// потом get-file-info.
-    pub fn stream_url(&self, track_id: &str) -> Res<(String, String)> {
-        match self.stream_url_legacy(track_id) {
+    /// потом get-file-info. Для докачки с середины — [`Self::stream_again`]: подпись живёт
+    /// недолго, но вариант файла остаётся тот, с которого загрузка началась.
+    pub(crate) fn lossy_stream(&self, track_id: &str, quality: u8) -> Res<StreamUrl> {
+        match self.stream_url_legacy(track_id, quality) {
             Ok(u) => Ok(u),
             Err(e1) => self
                 .file_info(track_id, "nq", "mp3,aac,he-aac")
-                .map(|(codec, u)| (u, codec.replace("he-", "HE-").to_uppercase()))
+                .map(|(codec, url)| StreamUrl {
+                    format: codec.replace("he-", "HE-").to_uppercase(),
+                    url,
+                    again: Again::File { quality: "nq", codec },
+                })
                 .map_err(|e2| format!("download-info: {e1}; get-file-info: {e2}")),
+        }
+    }
+
+    /// Новая подпись того же файла, что у `link`. Качество из настроек здесь не читается:
+    /// пока трек качался, его могли сменить, и продолжение с середины другого файла
+    /// сломало бы уже скачанное.
+    pub fn stream_again(&self, track_id: &str, link: &StreamUrl) -> Res<String> {
+        match &link.again {
+            Again::Variant(key) => {
+                let v = self.get(&format!("/tracks/{track_id}/download-info"), &[])?;
+                let arr = v.as_array().ok_or("пустой download-info")?;
+                let pick = find_variant(arr, key).ok_or("вариант файла больше не отдаётся")?;
+                let info_url = pick.get("downloadInfoUrl").and_then(|u| u.as_str()).ok_or("нет downloadInfoUrl")?;
+                self.mp3_from_info(info_url)
+            }
+            Again::File { quality, codec } => {
+                if codec.is_empty() { return Err("неизвестен кодек исходного файла".into()); }
+                let (got, url) = self.file_info(track_id, quality, codec)?;
+                if !got.eq_ignore_ascii_case(codec) {
+                    return Err(format!("докачка получила кодек {got}"));
+                }
+                Ok(url)
+            }
         }
     }
 
     /// Lossless без шифрования есть только как FLAC в MP4. None — у трека нет FLAC.
     pub fn flac_url(&self, track_id: &str) -> Res<Option<String>> {
-        let (codec, url) = self.file_info(track_id, "lossless", "flac-mp4,flac")?;
-        Ok(codec.starts_with("flac").then_some(url))
+        Ok(self.flac_stream(track_id)?.map(|stream| stream.url))
     }
 
-    fn stream_url_legacy(&self, track_id: &str) -> Res<(String, String)> {
+    fn flac_stream(&self, track_id: &str) -> Res<Option<StreamUrl>> {
+        let (codec, url) = self.file_info(track_id, "lossless", "flac-mp4,flac")?;
+        Ok(matches!(codec.as_str(), "flac-mp4" | "flac").then(|| StreamUrl {
+            url, format: "FLAC".into(), again: Again::File { quality: "lossless", codec },
+        }))
+    }
+
+    fn stream_url_legacy(&self, track_id: &str, quality: u8) -> Res<StreamUrl> {
         let v = self.get(&format!("/tracks/{track_id}/download-info"), &[])?;
         let arr = v.as_array().ok_or("пустой download-info")?;
-        let key = |x: &&Value| {
-            (
-                !x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false),
-                x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0),
-            )
-        };
-        let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == Some("mp3"));
-        let full = |x: &&Value| !x.get("preview").and_then(|p| p.as_bool()).unwrap_or(false);
-        let bitrate = |x: &&Value| x.get("bitrateInKbps").and_then(|b| b.as_u64()).unwrap_or(0);
-        let pick = match QUALITY.load(std::sync::atomic::Ordering::Relaxed) {
-            2 => mp3().filter(full).min_by_key(bitrate),
-            1 => mp3().filter(full).filter(|x| bitrate(x) <= 192).max_by_key(bitrate),
-            _ => None,
-        }
-        .or_else(|| mp3().max_by_key(key))
-        .or_else(|| arr.iter().max_by_key(key))
-        .ok_or("нет вариантов загрузки")?;
-        let codec = pick.get("codec").and_then(|c| c.as_str()).unwrap_or("mp3").to_uppercase();
-        let format = match bitrate(&pick) {
+        let pick = pick_variant(arr, quality).ok_or("нет вариантов загрузки")?;
+        let key = variant_key(pick);
+        let codec = key.codec.to_uppercase();
+        let format = match key.bitrate {
             0 => codec,
             kbps => format!("{codec} {kbps}"),
         };
         let info_url = pick.get("downloadInfoUrl").and_then(|u| u.as_str()).ok_or("нет downloadInfoUrl")?;
+        Ok(StreamUrl { url: self.mp3_from_info(info_url)?, format, again: Again::Variant(key) })
+    }
+
+    /// XML одного варианта download-info → прямая ссылка.
+    fn mp3_from_info(&self, info_url: &str) -> Res<String> {
         if !reqwest::Url::parse(info_url).is_ok_and(|u| token_allowed(&u)) {
             return Err("download-info: адрес не на сервере Яндекса".into());
         }
@@ -2119,13 +2401,7 @@ impl Api {
         if !status.is_success() {
             return Err(format!("download-info HTTP {status}"));
         }
-        let host = xml_tag(&xml, "host")?;
-        let path = xml_tag(&xml, "path")?;
-        let ts = xml_tag(&xml, "ts")?;
-        let sg = xml_tag(&xml, "s")?;
-        let digest = Md5::digest(format!("{MP3_SALT}{}{sg}", path.get(1..).unwrap_or("")).as_bytes());
-        let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-        Ok((format!("https://{host}/get-mp3/{hash}/{ts}{path}"), format))
+        direct_mp3(&xml)
     }
 
     /// Кодек и ссылка из get-file-info.
@@ -2198,7 +2474,7 @@ impl Api {
     /// Аудио с байта `from`. Соединение живёт не дольше `STREAM_TIMEOUT`: зависшее
     /// загрузчик переоткроет с того места, где оборвалось.
     pub fn open_from(&self, url: &str, from: u64) -> Res<reqwest::blocking::Response> {
-        let mut req = self.http.get(url).timeout(STREAM_TIMEOUT);
+        let mut req = self.http.get(url).header(reqwest::header::ACCEPT_ENCODING, "identity").timeout(STREAM_TIMEOUT);
         if from > 0 {
             req = req.header(reqwest::header::RANGE, format!("bytes={from}-"));
         }
@@ -2224,6 +2500,34 @@ impl Api {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn liked_waves_are_keyed_by_sorted_unique_seeds() {
+        let v = serde_json::json!({ "values": { "likedWaves": { "info": { "revision": 7 }, "values": { "liked": [
+            { "seeds": ["genre:rock"], "timestamp": "2026-11-01T00:00:00Z" },
+            { "seeds": ["mood:calm", "activity:road-trip", "mood:calm"], "timestamp": "2026-11-02T00:00:00Z" },
+            { "timestamp": "2026-11-03T00:00:00Z" }
+        ] } } } });
+        let keys = parse_liked_waves(&v).unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains("genre:rock"));
+        assert!(keys.contains("activity:road-trip,mood:calm"));
+        assert_eq!(wave_key(&["mood:calm".into(), "activity:road-trip".into()]), "activity:road-trip,mood:calm");
+        assert!(parse_liked_waves(&serde_json::json!({ "values": {} })).is_none());
+    }
+
+    #[test]
+    fn experiments_on_are_those_in_group_on() {
+        let v = serde_json::json!({
+            "WebNextWaveLikesAndShares": { "group": "on", "value": { "title": "on" } },
+            "WebNextVibeDescription": { "group": "default", "value": { "title": "default" } },
+            "WebNextOther": { "value": { "title": "on" } }
+        });
+        let on = experiments_on(&v);
+        assert!(on.contains("WebNextWaveLikesAndShares"));
+        assert_eq!(on.len(), 1);
+        assert!(experiments_on(&serde_json::json!([])).is_empty());
+    }
 
     #[test]
     fn album_label_link_requires_a_numeric_id() {
@@ -2255,8 +2559,23 @@ mod tests {
     }
 
     #[test]
+    fn decomposed_artist() {
+        let t = parse_track(&json!({"id": 1, "title": "A", "artists": [
+            {"id": 3, "name": "A & B", "decomposed": [{"id": 9, "name": "без разделителя"}, " & ", {"id": 4, "name": "B"}, ", "]},
+            {"id": 5, "name": "C"}
+        ]})).unwrap();
+        assert_eq!(t.artists, "A & B, C");
+        let parts: Vec<&str> = t.artist_list[0].decomposed.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(parts, ["B"]);
+        assert!(t.artist_list[1].decomposed.is_empty());
+    }
+
+    #[test]
     fn pic_size() {
         assert_eq!(pic("avatars.yandex.net/a/%%", 200), "https://avatars.yandex.net/a/200x200");
+        let promo = "avatars.yandex.net/get-music-feed-promotion/1/a-landing.image/%%";
+        assert_eq!(pic(promo, 356), "https://avatars.yandex.net/get-music-feed-promotion/1/a-landing.image/400x400");
+        assert_eq!(pic(promo, 445), "https://avatars.yandex.net/get-music-feed-promotion/1/a-landing.image/800x800");
     }
 
     #[test]
@@ -2275,6 +2594,20 @@ mod tests {
     }
 
     #[test]
+    fn album_disks() {
+        let disks = |v: Value| album_tracks(&v).iter().map(|t| t.disk).collect::<Vec<_>>();
+        let t = |id: u32, vol: u32| json!({"id": id, "title": "t", "albums": [{"id": 1, "trackPosition": {"volume": vol, "index": 1}}]});
+        // Один том — без заголовков.
+        assert_eq!(disks(json!({"volumes": [[t(1, 1), t(2, 1)]]})), vec![None, None]);
+        assert_eq!(disks(json!({"volumes": [[t(1, 1), t(2, 1)], [t(3, 2)], [t(4, 3), t(5, 3)]]})), vec![Some(1), None, Some(2), Some(3), None]);
+        // Сезоны подкаста идут с последнего: номер берётся из `trackPosition.volume`.
+        assert_eq!(disks(json!({"volumes": [[t(1, 3)], [t(2, 2), t(3, 2)], [t(4, 1)]]})), vec![Some(3), Some(2), None, Some(1)]);
+        // Без `trackPosition` — номер тома по порядку; пустой том заголовка не получает.
+        let bare = |id: u32| json!({"id": id, "title": "t"});
+        assert_eq!(disks(json!({"volumes": [[bare(1)], [], [bare(2)]]})), vec![Some(1), Some(3)]);
+    }
+
+    #[test]
     fn track_kind() {
         let t = |kind: &str| parse_track(&json!({"id": 1, "title": "A", "type": kind})).unwrap();
         assert!(t("podcast-episode").is_episode());
@@ -2284,6 +2617,19 @@ mod tests {
         assert!(!t("music").is_episode() && !t("music").is_chapter());
         let plain = parse_track(&json!({"id": 1, "title": "A"})).unwrap();
         assert!(!plain.is_episode() && !plain.is_chapter());
+    }
+
+    #[test]
+    fn cutout_like_vibe_page() {
+        let artist = json!({"id": 2, "name": "B", "cutoutCover": {"uri": "avatars.yandex.net/artist/%%"}});
+        // Сначала фото релиза, иначе фото главного исполнителя; размер orig.
+        let release = parse_track(&json!({"id": 1, "title": "A", "artists": [artist], "cutoutCover": {"uri": "avatars.yandex.net/release/%%"}})).unwrap();
+        assert_eq!(release.cutout_url().as_deref(), Some("https://avatars.yandex.net/release/orig"));
+        let own = parse_track(&json!({"id": 1, "title": "A", "artists": [artist]})).unwrap();
+        assert_eq!(own.cutout_url().as_deref(), Some("https://avatars.yandex.net/artist/orig"));
+        // Без главного исполнителя фото нет.
+        let none = parse_track(&json!({"id": 1, "title": "A", "cutoutCover": {"uri": "avatars.yandex.net/release/%%"}})).unwrap();
+        assert_eq!(none.cutout_url(), None);
     }
 }
 
@@ -2295,4 +2641,49 @@ fn shorter_chunked_audio_is_a_different_track() {
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&payload).unwrap();
     assert!(!same_saved_audio(&mut file, &payload[..21_000], None, None, &std::sync::atomic::AtomicBool::new(false)).unwrap());
+}
+
+#[cfg(test)]
+mod stream_variant_tests {
+    use super::*;
+    use serde_json::json;
+    fn variants() -> Vec<Value> {
+        vec![
+            json!({"codec": "mp3", "bitrateInKbps": 320, "preview": true, "downloadInfoUrl": "https://storage.mds.yandex.net/preview"}),
+            json!({"codec": "mp3", "bitrateInKbps": 64, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/low"}),
+            json!({"codec": "mp3", "bitrateInKbps": 192, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/mid"}),
+            json!({"codec": "mp3", "bitrateInKbps": 320, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/high"}),
+        ]
+    }
+
+    #[test]
+    fn quality_picks_bitrate_and_resume_keeps_that_variant() {
+        let arr = variants();
+        assert_eq!(pick_variant(&arr, 0).unwrap()["downloadInfoUrl"], "https://storage.mds.yandex.net/high");
+        assert_eq!(pick_variant(&arr, 1).unwrap()["downloadInfoUrl"], "https://storage.mds.yandex.net/mid");
+        assert_eq!(pick_variant(&arr, 2).unwrap()["downloadInfoUrl"], "https://storage.mds.yandex.net/low");
+        let key = variant_key(pick_variant(&arr, 0).unwrap());
+        let ambiguous = [arr[3].clone(), json!({"codec": "mp3", "bitrateInKbps": 320, "downloadInfoUrl": "another"})];
+        assert!(find_variant(&ambiguous, &key).is_none());
+        // Список пришёл в другом порядке, в настройках уже другое качество.
+        let later = [
+            json!({"codec": "mp3", "bitrateInKbps": 64, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/low-2"}),
+            json!({"codec": "mp3", "bitrateInKbps": 320, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/high-2"}),
+            json!({"codec": "aac", "bitrateInKbps": 320, "preview": false, "downloadInfoUrl": "https://storage.mds.yandex.net/aac"}),
+        ];
+        let again = find_variant(&later, &key).unwrap();
+        assert_eq!(again["bitrateInKbps"], 320);
+        assert_eq!(again["codec"], "mp3");
+        assert_eq!(pick_variant(&later, 2).unwrap()["downloadInfoUrl"], "https://storage.mds.yandex.net/low-2");
+        assert!(find_variant(&later[..1], &key).is_none());
+    }
+
+    #[test]
+    fn direct_mp3_keeps_host_path_and_ts() {
+        let xml = "<download-info><host>storage.mds.yandex.net</host><path>/x/y</path><ts>1700000000</ts><s>abc</s></download-info>";
+        let url = direct_mp3(xml).unwrap();
+        assert!(url.starts_with("https://storage.mds.yandex.net/get-mp3/"), "{url}");
+        assert!(url.ends_with("/1700000000/x/y"), "{url}");
+        assert_eq!(url, direct_mp3(xml).unwrap());
+    }
 }

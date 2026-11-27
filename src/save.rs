@@ -50,7 +50,7 @@ pub(crate) fn download_url(api: &Api, t: &Track, flac: bool) -> Result<String, S
             Err(e) => log(format!("flac {}: {e}", t.id)),
         }
     }
-    api.stream_url(&t.id).map(|(url, _)| url)
+    api.lossy_stream(&t.id, crate::api::QUALITY.load(std::sync::atomic::Ordering::Relaxed)).map(|link| link.url)
 }
 
 #[cfg(target_os = "android")]

@@ -6,8 +6,9 @@ use crate::api::{Account, Api, Batch, Res, Track, WaveSession, WAVE};
 use crate::config::log;
 use crate::eq::{Eq, EqParams};
 use crate::fade::{Fade, FadeOut};
-use crate::stream::{Buf, Reader};
-use rodio::{Decoder, Sink, Source as _};
+use crate::stream::Buf;
+use crate::decode::Decoded;
+use rodio::{Sink, Source as _};
 use std::collections::{HashSet, VecDeque};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -140,10 +141,10 @@ pub enum Cmd {
     SeekTrack(mpris_server::TrackId, i64),
     Volume(f32),
     Loudness(Loudness),
-    LikeTrack(Track, Option<LikeCompleted>),
+    LikeTrack(Box<Track>, Option<LikeCompleted>),
     Dislike(Option<LikeCompleted>),
-    #[cfg(target_os = "android")]
-    DislikeTrack(Track),
+    /// Дизлайк трека из меню или снять его, если уже стоит; трек не пропускается.
+    DislikeTrack(Box<Track>, Option<LikeCompleted>),
     Wave(Source),
     /// Заново начать «Мою волну» с настройками (seeds `setting…`).
     TuneWave(Vec<String>),
@@ -152,8 +153,9 @@ pub enum Cmd {
     Jump(usize),
     Repeat(Repeat),
     Shuffle(bool),
-    /// «Играть следующим» (`next`) или «Добавить в конец очереди».
-    Enqueue { track: Track, next: bool },
+    /// «Играть следующим» (`next`) или «Добавить в конец очереди»: трек или весь альбом и
+    /// плейлист, в своём порядке.
+    Enqueue { tracks: Vec<Track>, next: bool },
     /// Переключатель «Треки 18+».
     AllowExplicit(bool),
     /// Сколько треки перетекают друг в друга; ноль — без кроссфейда.
@@ -171,7 +173,7 @@ enum Msg {
     Dislikes(u64, Res<Vec<String>>),
     Batch { res: Res<Batch>, replace: bool, gen: u64 },
     Audio { gen: u64, res: Res<Audio> },
-    Prefetch { generation: u64, id: String, res: Res<Audio> },
+    Prefetch { generation: u64, key: PrefetchKey, res: Res<Audio> },
     Resume(u64, Res<Option<Resume>>),
 }
 
@@ -254,6 +256,7 @@ pub struct Player {
     tx: AudioSender,
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
+    dislikes: Likes,
     pub eq: Arc<EqParams>,
     source_request: Arc<Mutex<u64>>,
 }
@@ -265,10 +268,15 @@ impl Player {
         let shared = Arc::new(Mutex::new(Shared { volume: 0.6, ..Default::default() }));
         let likes: Likes = Default::default();
         let eq: Arc<EqParams> = Default::default();
-        let p = Player { tx: tx.clone(), shared: shared.clone(), likes: likes.clone(), eq: eq.clone(), source_request: Default::default() };
+        let dislikes: Likes = Default::default();
+        let p = Player { tx: tx.clone(), shared: shared.clone(), likes: likes.clone(), dislikes: dislikes.clone(), eq: eq.clone(), source_request: Default::default() };
         thread::Builder::new()
             .name("audio".into())
-            .spawn(move || Engine::new(tx, shared, likes, notify, eq, asio_driver).run(rx))
+            .spawn(move || {
+                let mut engine = Engine::new(tx, shared, likes, notify, eq, asio_driver);
+                engine.dislikes = dislikes;
+                engine.run(rx)
+            })
             .expect("audio thread");
         p
     }
@@ -325,6 +333,10 @@ impl Player {
 
     pub(crate) fn take_like_error(&self) -> Option<String> {
         self.shared.lock().unwrap().like_error.take()
+    }
+
+    pub(crate) fn is_disliked(&self, id: &str) -> bool {
+        self.dislikes.lock().unwrap().contains(id)
     }
 
     pub fn is_liked(&self, id: &str) -> bool {
@@ -588,7 +600,19 @@ fn round3(x: f64) -> f64 {
 
 /// Трек, который качается, и декодер, уже прочитавший его начало.
 /// Скачиваемый трек, его декодер и формат («MP3 320»).
-type Audio = (Arc<Buf>, Decoder<Reader>, String);
+#[derive(Clone, PartialEq, Eq)]
+struct PrefetchKey {
+    id: String,
+    quality: u8,
+}
+
+impl PrefetchKey {
+    fn matches(&self, id: &str) -> bool {
+        self.id == id && self.quality == crate::api::QUALITY.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+type Audio = (Arc<Buf>, Decoded, String);
 
 /// Многоканальные выходы Windows (виртуальные 7.1 у гарнитур) искажают f32, а i32 играют чисто: cpal#892.
 #[cfg(windows)]
@@ -620,12 +644,31 @@ const STALL_LIMIT: Duration = Duration::from_secs(3);
 /// Если выход снова сломался быстрее этого, не переоткрываем его, а ставим паузу до Play.
 const BROKEN_AGAIN: Duration = Duration::from_secs(30);
 
-fn load_track(api: &Api, t: &Track) -> Res<Audio> {
-    let (url, format) = api.stream_url(&t.id)?;
-    let (again, id) = (api.clone(), t.id.clone());
-    // Ссылка подписана и живёт недолго, поэтому для докачки берётся новая.
-    let buf = Buf::download(api.open_from(&url, 0)?, move |from| again.open_from(&again.stream_url(&id)?.0, from))?;
-    let dec = Decoder::new(buf.reader()).map_err(|e| format!("не удалось декодировать: {e}"))?;
+/// Пауза перед повтором входа после сетевой ошибки: 2, 5, 10, 20, 30 с, дальше раз в минуту.
+fn account_retry_delay(attempt: u32) -> Duration {
+    const STEPS: [u64; 5] = [2, 5, 10, 20, 30];
+    Duration::from_secs(STEPS.get(attempt.saturating_sub(1) as usize).copied().unwrap_or(60))
+}
+
+fn load_track(api: &Api, t: &Track, quality: u8) -> Res<Audio> {
+    let link = api.stream_url(&t.id, quality)?;
+    let lossless = link.format == "FLAC";
+    match open_track(api, &t.id, link) {
+        Err(e) if lossless => {
+            log(format!("FLAC {} не открылся: {e}", t.id));
+            open_track(api, &t.id, api.lossy_stream(&t.id, quality)?)
+        }
+        result => result,
+    }
+}
+
+fn open_track(api: &Api, track_id: &str, link: crate::api::StreamUrl) -> Res<Audio> {
+    let format = link.format.clone();
+    let first = api.open_from(&link.url, 0)?;
+    let (api, id) = (api.clone(), track_id.to_string());
+    let buf = Buf::download(first, move |from| api.open_from(&api.stream_again(&id, &link)?, from))?;
+    let dec = Decoded::open(buf.reader()).map_err(|e| format!("не удалось декодировать: {e}"))?;
+    if format == "FLAC" && !dec.is_flac() { return Err("вместо FLAC получен другой кодек".into()); }
     Ok((buf, dec, format))
 }
 
@@ -751,7 +794,7 @@ struct Engine {
     reaction_writes: std::collections::HashMap<String, ReactionWrite>,
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
-    dislikes: HashSet<String>,
+    dislikes: Likes,
     broke_at: Option<Instant>,
 
     notify: Notify,
@@ -812,6 +855,7 @@ struct Engine {
     // Выбранная станция заменяет старый трек, когда придёт первая пригодная запись.
     starting_wave: bool,
     retry_at: Option<Instant>,
+    account_retry: Option<(Instant, u32)>,
     gen: u64,
     loaded: bool,
     paused: bool,
@@ -819,8 +863,8 @@ struct Engine {
     loudness: Loudness,
     repeat: Repeat,
     shuffle: bool,
-    prefetch: Option<(String, Audio)>,
-    prefetching: Option<String>,
+    prefetch: Option<(PrefetchKey, Audio)>,
+    prefetching: Option<PrefetchKey>,
     errors_in_row: u32,
     was_playing: bool,
     handled_seek: u64,
@@ -845,7 +889,7 @@ impl Engine {
             reaction_writes: Default::default(),
             shared,
             likes,
-            dislikes: HashSet::new(),
+            dislikes: Default::default(),
             broke_at: None,
             notify,
             eq,
@@ -886,6 +930,7 @@ impl Engine {
             batch_gen: 0,
             starting_wave: false,
             retry_at: None,
+            account_retry: None,
             gen: 0,
             loaded: false,
             paused: true,
@@ -959,10 +1004,10 @@ impl Engine {
     }
 
     /// Источник для звука: эквалайзер, декодирование наперёд и затухание для кроссфейда.
-    fn source(&mut self, src: Decoder<Reader>, fade_in: Duration) -> impl rodio::Source<Item = f32> + Send + 'static {
+    fn source(&mut self, src: Decoded, fade_in: Duration) -> impl rodio::Source<Item = f32> + Send + 'static {
         self.fade_out = Arc::default();
         let rate = self.audio.as_ref().map_or_else(|| src.sample_rate(), Output::sample_rate);
-        let eq = Eq::new(src.convert_samples::<f32>(), self.eq.clone());
+        let eq = Eq::new(src, self.eq.clone());
         Fade::new(Ahead::new(eq, rate), fade_in, self.fade_out.clone())
     }
 
@@ -972,7 +1017,7 @@ impl Engine {
             return false;
         }
         let next_ready = match (self.queue.front(), &self.prefetch) {
-            (Some(next), Some((id, _))) => *id == next.id,
+            (Some(next), Some((key, _))) => key.matches(&next.id),
             _ => false,
         };
         let fade = self.crossfade.as_secs_f32();
@@ -995,18 +1040,18 @@ impl Engine {
     }
 
     fn attach(&mut self, buf: Arc<Buf>, pos: Duration) -> Result<(), String> {
-        let decoder = Decoder::new(buf.reader()).map_err(|e| e.to_string())?;
+        let decoder = Decoded::open(buf.reader())?;
         self.attach_decoder(decoder, pos, Duration::ZERO)
     }
 
-    fn attach_decoder(&mut self, mut decoder: Decoder<Reader>, mut pos: Duration, fade_in: Duration) -> Result<(), String> {
+    fn attach_decoder(&mut self, mut decoder: Decoded, mut pos: Duration, fade_in: Duration) -> Result<(), String> {
         if !pos.is_zero() {
             if let Err(e) = decoder.try_seek(pos) {
                 let message = format!("Не удалось восстановить позицию: {e}");
                 if self.loaded { return Err(message); }
                 // Перемотка пришла до загрузки. Сам трек можно воспроизвести с начала.
                 log(message);
-                decoder = Decoder::new(self.current_buf.as_ref().ok_or("Нет данных трека")?.reader()).map_err(|e| e.to_string())?;
+                decoder = Decoded::open(self.current_buf.as_ref().ok_or("Нет данных трека")?.reader())?;
                 pos = Duration::ZERO;
             }
         }
@@ -1336,7 +1381,7 @@ impl Engine {
 
     fn reset(&mut self) {
         self.account_generation += 1;
-        self.dislikes.clear();
+        self.dislikes.lock().unwrap().clear();
         self.sh().disliked = false;
         self.broke_at = None;
         self.reaction_writes.clear();
@@ -1448,6 +1493,18 @@ impl Engine {
                 self.fetch_batch();
             }
         }
+        if let (Some((at, n)), Some(api)) = (self.account_retry, self.api.clone()) {
+            if Instant::now() >= at {
+                // Повтор уже в пути: следующий срок назначит его ответ.
+                self.account_retry = Some((Instant::now() + Duration::from_secs(3600), n));
+                let gen = self.account_generation;
+                self.sh().status = Status::Connecting;
+                let tx = self.tx.clone();
+                thread::spawn(move || {
+                    let _ = tx.send(Msg::Account(gen, api.account()));
+                });
+            }
+        }
         if self.fading.as_ref().is_some_and(|s| s.empty()) {
             self.fading = None;
         }
@@ -1458,6 +1515,13 @@ impl Engine {
             return;
         }
         if self.loaded && !self.paused && self.sink().map(|s| s.empty()).unwrap_or(false) {
+            if let Some(error) = self.current_buf.as_ref().and_then(|buf| buf.error()) {
+                self.stop_audio();
+                self.on_load_error(error);
+                self.sync();
+                (self.notify)();
+                return;
+            }
             if self.active_repeat() == Repeat::One && self.current_buf.is_some() {
                 if let Some(l) = &mut self.listen {
                     l.repeated = true;
@@ -1476,7 +1540,7 @@ impl Engine {
             return;
         }
         self.sync();
-        if self.loaded && self.prefetch.is_none() && self.prefetching.is_none() {
+        if self.loaded && self.prefetching.is_none() && !self.prefetch.as_ref().is_some_and(|(key, _)| self.queue.front().is_some_and(|t| key.matches(&t.id))) {
             self.prefetch_next();
         }
         let playing = self.sh().playing;
@@ -1503,6 +1567,7 @@ impl Engine {
             Msg::Account(gen, _) | Msg::Likes(gen, _) | Msg::Dislikes(gen, _) if gen != self.account_generation => {}
             Msg::Account(gen, res) => match res {
                 Ok(acc) => {
+                    self.account_retry = None;
                     self.uid = acc.uid.clone();
                     {
                         let mut s = self.sh();
@@ -1527,8 +1592,18 @@ impl Engine {
                         });
                     }
                 }
+                // Сеть пропала на входе (таймаут, нет соединения): вход повторяется сам, иначе
+                // клиент остался бы без волны и запросов до перезапуска. Ошибка показывается
+                // один раз, дальше — «подключение». Отказ сервера (токен и т. п.) — как раньше.
+                Err(e) if e.starts_with("сеть") && self.api.is_some() => {
+                    log(format!("account: {e}"));
+                    let n = self.account_retry.map_or(0, |(_, n)| n) + 1;
+                    self.account_retry = Some((Instant::now() + account_retry_delay(n), n));
+                    self.sh().status = if n == 1 { Status::Failed(e) } else { Status::Connecting };
+                }
                 Err(e) => {
                     log(format!("account: {e}"));
+                    self.account_retry = None;
                     self.api = None;
                     self.sh().status = Status::Failed(e);
                 }
@@ -1599,15 +1674,18 @@ impl Engine {
                     }
                 }
             }
-            Msg::Prefetch { generation, id, res } => {
-                if generation != self.account_generation { return; }
-                if self.prefetching.as_deref() == Some(id.as_str()) {
-                    self.prefetching = None;
+            Msg::Prefetch { generation, key, res } => {
+                if generation != self.account_generation || self.prefetching.as_ref() != Some(&key) { return; }
+                self.prefetching = None;
+                let id = &key.id;
+                let waiting = !self.loaded && self.current.as_ref().is_some_and(|t| t.id == *id);
+                if !key.matches(id) {
+                    if waiting { self.start_download(); }
+                    return;
                 }
-                let waiting = !self.loaded && self.current.as_ref().map(|t| t.id == id).unwrap_or(false);
                 match res {
                     Ok(b) if waiting => self.play_loaded(b),
-                    Ok(b) => self.prefetch = Some((id, b)),
+                    Ok(b) => self.prefetch = Some((key, b)),
                     Err(e) => {
                         log(format!("prefetch {id}: {e}"));
                         if waiting {
@@ -1629,6 +1707,7 @@ impl Engine {
                 reply(self.asio_driver.clone(), error);
             }
             Cmd::Login(token) => {
+                self.account_retry = None;
                 self.reset();
                 self.likes.lock().unwrap().clear();
                 self.likes_changed();
@@ -1646,6 +1725,7 @@ impl Engine {
                 });
             }
             Cmd::Logout => {
+                self.account_retry = None;
                 self.reset();
                 self.api = None;
                 self.uid.clear();
@@ -1699,15 +1779,17 @@ impl Engine {
                 self.loudness = l;
                 self.apply_volume();
             }
-            Cmd::LikeTrack(t, saved) => self.toggle_like(t, saved),
+            Cmd::LikeTrack(t, saved) => self.toggle_like(*t, saved),
             Cmd::Dislike(done) => {
                 let Some(track) = self.current.clone() else { return };
-                let remove = self.dislikes.contains(&track.id);
+                let remove = self.dislikes.lock().unwrap().contains(&track.id);
                 self.write_reaction(&track, Reaction::Dislike, remove, done);
                 if !remove { self.advance(End::Dislike); }
             }
-            #[cfg(target_os = "android")]
-            Cmd::DislikeTrack(track) => self.write_reaction(&track, Reaction::Dislike, false, None),
+            Cmd::DislikeTrack(track, done) => {
+                let remove = self.dislikes.lock().unwrap().contains(&track.id);
+                self.write_reaction(&track, Reaction::Dislike, remove, done);
+            }
             Cmd::Wave(src) => self.start_wave(src, true),
             Cmd::TuneWave(settings) => {
                 self.start_wave(Source::Wave, false);
@@ -1740,16 +1822,18 @@ impl Engine {
             }
             Cmd::Repeat(r) if self.source.station().is_some() => self.wave_repeat = if r == Repeat::One { r } else { Repeat::Off },
             Cmd::Repeat(r) => self.repeat = r,
-            Cmd::Enqueue { mut track, next } => {
-                track.list_position = None;
+            Cmd::Enqueue { mut tracks, next } => {
+                for t in &mut tracks { t.list_position = None; }
                 if next {
-                    self.queue.push_front(track);
+                    for t in tracks.into_iter().rev() {
+                        self.queue.push_front(t);
+                    }
                     self.prefetch = None;
                     if self.loaded {
                         self.prefetch_next();
                     }
                 } else {
-                    self.queue.push_back(track);
+                    self.queue.extend(tracks);
                 }
             }
             Cmd::AllowExplicit(allow) => self.set_allow_explicit(allow),
@@ -1796,13 +1880,13 @@ impl Engine {
                 continue;
             }
             match kind {
-                Reaction::Like => { self.dislikes.remove(&id); changed |= likes.insert(id); }
-                Reaction::Dislike => { changed |= likes.remove(&id); self.dislikes.insert(id); }
+                Reaction::Like => { self.dislikes.lock().unwrap().remove(&id); changed |= likes.insert(id); }
+                Reaction::Dislike => { changed |= likes.remove(&id); self.dislikes.lock().unwrap().insert(id); }
             }
         }
         drop(likes);
         if changed { self.likes_changed(); }
-        self.sh().disliked = self.current.as_ref().is_some_and(|t| self.dislikes.contains(&t.id));
+        self.sh().disliked = self.current.as_ref().is_some_and(|t| self.dislikes.lock().unwrap().contains(&t.id));
     }
 
     fn show_reaction(&mut self, id: &str, state: Option<Reaction>) {
@@ -1811,14 +1895,14 @@ impl Engine {
         drop(likes);
         if changed { self.likes_changed(); }
         let disliked = state == Some(Reaction::Dislike);
-        if disliked { self.dislikes.insert(id.to_string()); } else { self.dislikes.remove(id); }
+        if disliked { self.dislikes.lock().unwrap().insert(id.to_string()); } else { self.dislikes.lock().unwrap().remove(id); }
         if self.current.as_ref().is_some_and(|t| t.id == id) { self.sh().disliked = disliked; }
     }
 
     fn write_reaction(&mut self, track: &Track, kind: Reaction, remove: bool, done: Option<LikeCompleted>) {
         let Some(api) = self.api.clone() else { return };
         let old = if self.likes.lock().unwrap().contains(&track.id) { Some(Reaction::Like) }
-            else if self.dislikes.contains(&track.id) { Some(Reaction::Dislike) } else { None };
+            else if self.dislikes.lock().unwrap().contains(&track.id) { Some(Reaction::Dislike) } else { None };
         self.reaction_seq += 1;
         let seq = self.reaction_seq;
         self.reaction_writes.entry(track.id.clone()).or_insert(ReactionWrite {
@@ -2036,9 +2120,9 @@ impl Engine {
         if self.list.is_some() || self.source.station().is_none() || self.session.is_empty() {
             return;
         }
-        self.queue.retain(|t| t.batch_id.is_empty());
-        if let Some((id, _)) = &self.prefetch {
-            if !self.queue.iter().any(|t| t.id == *id) {
+        self.queue.retain(|t| t.returned_to_queue || t.batch_id.is_empty());
+        if let Some((key, _)) = &self.prefetch {
+            if !self.queue.iter().any(|t| key.matches(&t.id)) {
                 self.prefetch = None;
             }
         }
@@ -2146,7 +2230,8 @@ impl Engine {
             self.queue.retain(|t| !t.explicit);
         }
         match self.queue.pop_front() {
-            Some(t) => {
+            Some(mut t) => {
+                t.returned_to_queue = false;
                 self.current = Some(t);
                 self.start_current();
             }
@@ -2176,7 +2261,8 @@ impl Engine {
         }
         if let Some(p) = self.history.pop() {
             self.end_current(Some("skip"), false, "back_skip");
-            if let Some(c) = self.current.take() {
+            if let Some(mut c) = self.current.take() {
+                c.returned_to_queue = true;
                 self.queue.push_front(c);
             }
             self.stop_audio();
@@ -2212,21 +2298,23 @@ impl Engine {
             s.playing = false;
             s.paused = self.paused;
             s.track_generation = self.gen;
-            s.disliked = self.dislikes.contains(&t.id);
+            s.disliked = self.dislikes.lock().unwrap().contains(&t.id);
             s.track = Some(t.clone());
             s.position = position;
             s.duration = t.duration_ms as f32 / 1000.0;
             s.loading = true;
         }
         (self.notify)();
-        if self.prefetch.as_ref().map(|(id, _)| *id == t.id).unwrap_or(false) {
+        if self.prefetch.as_ref().is_some_and(|(key, _)| key.matches(&t.id)) {
             let (_, b) = self.prefetch.take().unwrap();
             self.play_loaded(b);
             return;
         }
-        if self.prefetching.as_deref() == Some(t.id.as_str()) {
+        if self.prefetching.as_ref().is_some_and(|key| key.matches(&t.id)) {
             return;
         }
+        self.prefetching = None;
+        self.prefetch = None;
         self.start_download();
     }
 
@@ -2234,8 +2322,9 @@ impl Engine {
         let (Some(api), Some(t)) = (self.api.clone(), self.current.clone()) else { return };
         let gen = self.gen;
         let tx = self.tx.clone();
+        let quality = crate::api::QUALITY.load(std::sync::atomic::Ordering::Relaxed);
         thread::spawn(move || {
-            let res = load_track(&api, &t);
+            let res = load_track(&api, &t, quality);
             let _ = tx.send(Msg::Audio { gen, res });
         });
     }
@@ -2250,17 +2339,18 @@ impl Engine {
             return;
         }
         let Some(next) = self.queue.front().cloned() else { return };
-        let have = self.prefetch.as_ref().map(|(id, _)| *id == next.id).unwrap_or(false);
+        let have = self.prefetch.as_ref().is_some_and(|(key, _)| key.matches(&next.id));
         if have || self.prefetching.is_some() {
             return;
         }
         let Some(api) = self.api.clone() else { return };
         let generation = self.account_generation;
-        self.prefetching = Some(next.id.clone());
+        let key = PrefetchKey { id: next.id.clone(), quality: crate::api::QUALITY.load(std::sync::atomic::Ordering::Relaxed) };
+        self.prefetching = Some(key.clone());
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let res = load_track(&api, &next);
-            let _ = tx.send(Msg::Prefetch { generation, id: next.id, res });
+            let res = load_track(&api, &next, key.quality);
+            let _ = tx.send(Msg::Prefetch { generation, key, res });
         });
     }
 
@@ -2326,7 +2416,7 @@ impl Engine {
                 }
             } else {
                 let format = self.sh().format.clone();
-                match Decoder::new(buf.reader()) {
+                match Decoded::open(buf.reader()) {
                     Ok(src) => self.play_loaded((buf, src, format)),
                     Err(e) => self.on_load_error(e.to_string()),
                 }
@@ -2485,6 +2575,140 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn login_retries_after_network_error() {
+        let mut e = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
+        e.api = Some(Api::new(""));
+        // Сеть: ошибка показывается один раз, вход повторится через 2 с.
+        e.handle(Msg::Account(e.account_generation, Err("сеть: operation timed out".into())));
+        assert!(matches!(e.sh().status, Status::Failed(_)));
+        assert!(e.api.is_some());
+        let (at, n) = e.account_retry.expect("повтор назначен");
+        assert_eq!(n, 1);
+        assert!(at > Instant::now() + Duration::from_millis(1500));
+        // Снова сеть: тоста больше нет, пауза длиннее.
+        e.handle(Msg::Account(e.account_generation, Err("сеть: connection refused".into())));
+        assert_eq!(e.sh().status, Status::Connecting);
+        assert_eq!(e.account_retry.map(|(_, n)| n), Some(2));
+        // Отказ сервера — без повторов, как раньше.
+        e.handle(Msg::Account(e.account_generation, Err("нет доступа (HTTP 401) — токен не подошёл или истёк.".into())));
+        assert!(e.account_retry.is_none() && e.api.is_none());
+        assert_eq!(account_retry_delay(1), Duration::from_secs(2));
+        assert_eq!(account_retry_delay(5), Duration::from_secs(30));
+        assert_eq!(account_retry_delay(9), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn wave_skip_keeps_tracks_returned_by_back() {
+        let mut e = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
+        let t = |id: u32| {
+            let mut t = crate::api::parse_track(&serde_json::json!({"id": id, "title": "t"})).unwrap();
+            t.batch_id = "b".into();
+            t
+        };
+        e.session = "s".into();
+        e.queue = VecDeque::from([t(2), t(3), t(9)]);
+        for t in e.queue.iter_mut().take(2) { t.returned_to_queue = true; }
+        e.cmd(Cmd::Enqueue { tracks: vec![t(42)], next: true });
+        e.play_from_queue();
+        e.refresh_wave();
+        e.play_from_queue();
+        e.refresh_wave();
+        assert_eq!(e.queue.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["3"]);
+    }
+
+    #[test]
+    fn changing_quality_discards_ready_and_inflight_prefetch() {
+        let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
+        let track = crate::api::parse_track(&serde_json::json!({"id": 7, "title": "track"})).unwrap();
+        let key = PrefetchKey { id: track.id.clone(), quality: crate::api::QUALITY.load(std::sync::atomic::Ordering::Relaxed).wrapping_add(1) };
+        let buf = Buf::from_bytes(include_bytes!("../tests/fixtures/flac24.m4a"));
+        let audio = || (buf.clone(), Decoded::open(buf.reader()).unwrap(), "FLAC".into());
+        engine.current = Some(track);
+        engine.prefetch = Some((key.clone(), audio()));
+        engine.start_current();
+        assert!(engine.prefetch.is_none() && engine.current_buf.is_none());
+        engine.prefetching = Some(key.clone());
+        engine.handle(Msg::Prefetch { generation: engine.account_generation, key, res: Ok(audio()) });
+        assert!(engine.prefetching.is_none() && engine.prefetch.is_none() && engine.current_buf.is_none());
+    }
+
+    #[test]
+    fn excellent_quality_opens_flac_and_falls_back_to_playable_mp3() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        for (codec, valid_audio, expected) in [("flac-mp4", true, "FLAC"), ("mp3", true, "MP3"), ("flac-mp4", false, "MP3")] {
+            let server = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let base = format!("http://{}", server.local_addr().unwrap());
+            let api = Api::local_server(base.clone());
+            let worker = thread::spawn(move || {
+                let mut requests = Vec::new();
+                loop {
+                    let (mut client, _) = server.accept().unwrap();
+                    let mut reader = BufReader::new(&client);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let path = line.split_whitespace().nth(1).unwrap().to_owned();
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" { break; }
+                    }
+                    let body = if path.starts_with("/get-file-info?") {
+                        let (format, file) = if path.contains("quality=lossless") { (codec, "first") } else { ("mp3", "lossy") };
+                        serde_json::json!({"result": {"downloadInfo": {"codec": format, "url": format!("{base}/{file}")}}}).to_string().into_bytes()
+                    } else if path.starts_with("/tracks/7/download-info") {
+                        br#"{"result":[]}"#.to_vec()
+                    } else if path == "/first" && valid_audio {
+                        include_bytes!("../tests/fixtures/flac24.m4a").to_vec()
+                    } else {
+                        assert!(matches!(path.as_str(), "/first" | "/lossy"));
+                        include_bytes!("../tests/fixtures/silence.mp3").to_vec()
+                    };
+                    write!(client, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                    client.write_all(&body).unwrap();
+                    let done = path == "/lossy" || (path == "/first" && expected == "FLAC");
+                    requests.push(path);
+                    if done { return requests; }
+                }
+            });
+            let track = crate::api::parse_track(&serde_json::json!({"id": 7, "title": "track"})).unwrap();
+            let (_, mut decoder, label) = load_track(&api, &track, 0).unwrap();
+            assert_eq!(label, expected);
+            assert_eq!(decoder.is_flac(), expected == "FLAC");
+            assert!(decoder.next().is_some());
+            let requests = worker.join().unwrap();
+            assert!(requests[0].contains("quality=lossless"));
+            assert_eq!(requests.iter().any(|p| p.contains("download-info")), expected == "MP3");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "explicitly requested read-only check against a signed-in Windows profile"]
+    fn signed_in_stream_format() {
+        let id = std::env::var("YAMUSIC_VERIFY_TRACK").expect("track id");
+        let file = std::fs::File::open(crate::config::dir().join("config.json")).expect("profile");
+        let profile: serde_json::Value = serde_json::from_reader(file).expect("config");
+        let token = profile["token_sealed"].as_str().and_then(crate::secret::open).expect("no active Windows sign-in");
+        let api = Api::new(&token);
+        let track = crate::api::parse_track(&serde_json::json!({"id": id, "title": "format check"})).unwrap();
+        let (_buf, decoder, label) = load_track(&api, &track, 0).unwrap_or_else(|_| panic!("service did not return playable audio"));
+        eprintln!("track={} format={} flac={} rate={} channels={}", track.id, label, decoder.is_flac(), decoder.sample_rate(), decoder.channels());
+        assert_eq!(decoder.is_flac(), label == "FLAC");
+    }
+
+    #[test]
+    fn enqueued_list_keeps_its_order() {
+        let mut e = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
+        let t = |id: u32| crate::api::parse_track(&serde_json::json!({"id": id, "title": "t"})).unwrap();
+        let ids = |e: &Engine| e.queue.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        e.queue.push_back(t(1));
+        e.cmd(Cmd::Enqueue { tracks: vec![t(2), t(3)], next: true });
+        assert_eq!(ids(&e), ["2", "3", "1"]);
+        e.cmd(Cmd::Enqueue { tracks: vec![t(4), t(5)], next: false });
+        assert_eq!(ids(&e), ["2", "3", "1", "4", "5"]);
+    }
+
+    #[test]
     fn closing_while_restored_track_loads_keeps_ynison_position() {
         let mut engine = Engine::new(mpsc::channel().0, Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
         let track = crate::api::parse_track(&serde_json::json!({"id": 7, "title": "Track", "durationMs": 120000})).unwrap();
@@ -2499,7 +2723,7 @@ mod tests {
     fn seek_keeps_latest_position_until_audio_acknowledges_it() {
         let (tx, rx) = mpsc::channel();
         let mut e = Engine::new(tx.clone(), Default::default(), Default::default(), Arc::new(|| {}), Default::default(), None);
-        let player = Player { tx: tx.into(), shared: e.shared.clone(), likes: e.likes.clone(), eq: e.eq.clone(), source_request: Default::default() };
+        let player = Player { tx: tx.into(), shared: e.shared.clone(), likes: e.likes.clone(), dislikes: e.dislikes.clone(), eq: e.eq.clone(), source_request: Default::default() };
         e.loaded = true;
         e.position_base = Duration::from_secs(10);
         e.current = crate::api::parse_track(&serde_json::json!({"id": 1, "title": "seek"}));
@@ -2543,13 +2767,13 @@ mod tests {
         e.cmd(Cmd::Dislike(None));
         e.handle(Msg::ReactionFinished { uid: "account".into(), id: "7".into(), seq: 1, kind: Reaction::Like, remove: false, result: Ok(()) });
         assert!(!e.likes.lock().unwrap().contains("7"));
-        assert!(e.dislikes.contains("7"));
+        assert!(e.dislikes.lock().unwrap().contains("7"));
         e.handle(Msg::Likes(0, Ok(vec!["7".into()])));
         assert!(!e.likes.lock().unwrap().contains("7"));
         e.handle(Msg::ReactionFinished { uid: "account".into(), id: "7".into(), seq: 2, kind: Reaction::Dislike,
             remove: false, result: Err("offline".into()) });
         assert!(e.likes.lock().unwrap().contains("7"));
-        assert!(!e.dislikes.contains("7"));
+        assert!(!e.dislikes.lock().unwrap().contains("7"));
     }
 
     #[test]
@@ -2580,7 +2804,7 @@ mod tests {
         let mut frame = vec![0u8; 417];
         frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x64]);
         let buf = Buf::from_bytes(&frame.repeat(12));
-        let decoder = Decoder::new(buf.reader()).unwrap();
+        let decoder = Decoded::open(buf.reader()).unwrap();
         (buf, decoder, "MP3".into())
     }
 
@@ -2647,7 +2871,7 @@ mod tests {
         engine.retry_at = Some(Instant::now());
         engine.tick();
         let track = wave_batch(&["manual"]).tracks.pop().unwrap();
-        engine.cmd(Cmd::Enqueue { track, next: true });
+        engine.cmd(Cmd::Enqueue { tracks: vec![track], next: true });
         engine.on_batch(wave_batch(&["next"]), true);
         assert_eq!(engine.current.as_ref().unwrap().id, "manual");
         assert_eq!(engine.queue.front().unwrap().id, "next");
@@ -2675,7 +2899,7 @@ mod tests {
         engine.start_wave(Source::Wave, true);
         let mut blocked = wave_batch(&["blocked"]).tracks.pop().unwrap();
         blocked.explicit = true;
-        engine.cmd(Cmd::Enqueue { track: blocked, next: true });
+        engine.cmd(Cmd::Enqueue { tracks: vec![blocked], next: true });
         engine.on_batch(wave_batch(&["current"]), false);
         assert_eq!(engine.current.as_ref().unwrap().id, "current");
         assert!(engine.starting_wave);
@@ -2904,7 +3128,7 @@ mod tests {
     #[cfg(all(windows, feature = "asio"))]
     fn check_crossfade_and_reopen(engine: &mut Engine, buf: &Arc<Buf>) {
         let next = engine.queue.front().unwrap().id.clone();
-        engine.prefetch = Some((next.clone(), (buf.clone(), Decoder::new(buf.reader()).unwrap(), "MP3".into())));
+        engine.prefetch = Some((PrefetchKey { id: next.clone(), quality: crate::api::QUALITY.load(std::sync::atomic::Ordering::Relaxed) }, (buf.clone(), Decoded::open(buf.reader()).unwrap(), "MP3".into())));
         engine.cmd(Cmd::Crossfade(Duration::from_millis(300)));
         let end = engine.pos() + 0.2;
         engine.sh().duration = end;
@@ -2926,7 +3150,7 @@ mod tests {
         let buf = Buf::from_bytes(&std::fs::read(std::env::var_os("YAMUSIC_TEST_AUDIO").unwrap()).unwrap());
         let mut engine = test_engine(None);
         engine.paused = false;
-        engine.play_loaded((buf.clone(), Decoder::new(buf.reader()).unwrap(), "MP3".into()));
+        engine.play_loaded((buf.clone(), Decoded::open(buf.reader()).unwrap(), "MP3".into()));
         let next = crate::api::parse_track(&serde_json::json!({ "id": "2", "title": "Следующий" })).unwrap();
         engine.queue.push_back(next);
         engine.seek(Duration::from_secs(3));
@@ -2943,7 +3167,7 @@ mod tests {
         let buf = Buf::from_bytes(&std::fs::read(std::env::var_os("YAMUSIC_TEST_AUDIO").unwrap()).unwrap());
         let mut engine = test_engine(None);
         engine.paused = false;
-        engine.play_loaded((buf.clone(), Decoder::new(buf.reader()).unwrap(), "MP3".into()));
+        engine.play_loaded((buf.clone(), Decoded::open(buf.reader()).unwrap(), "MP3".into()));
         wait_for_audio(&engine, 0.0);
         let next = crate::api::parse_track(&serde_json::json!({ "id": "2", "title": "Следующий" })).unwrap();
         engine.queue.push_back(next);
@@ -3030,10 +3254,10 @@ mod tests {
     #[ignore]
     fn stream_and_decode() {
         let api = Api::new("");
-        let (url, _) = api.stream_url("57703").expect("stream url");
+        let url = api.stream_url("57703", 0).expect("stream url").url;
         let bytes = api.fetch_bytes(&url).expect("download");
         assert!(bytes.len() > 50_000);
-        let dec = Decoder::new(Cursor::new(bytes)).expect("decode");
+        let dec = Decoded::open(Cursor::new(bytes)).expect("decode");
         let samples = dec.take(44100).count();
         assert!(samples > 1000);
     }
@@ -3086,7 +3310,7 @@ fn explicit_filter_survives_repeat_and_previous() {
 #[test]
 fn later_source_command_expires_artist_request() {
     let (tx, rx) = mpsc::channel();
-    let player = Player { tx: tx.into(), shared: Default::default(), likes: Default::default(), eq: Default::default(), source_request: Default::default() };
+    let player = Player { tx: tx.into(), shared: Default::default(), likes: Default::default(), dislikes: Default::default(), eq: Default::default(), source_request: Default::default() };
     let first = player.begin_source_request();
     let second = player.begin_source_request();
     assert!(!player.send_for_request(first, Cmd::Wave(Source::Wave)));

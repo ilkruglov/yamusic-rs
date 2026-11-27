@@ -1,8 +1,8 @@
 [package]
 name = "yamusic-rs"
-version = "1.1.9"
+version = "1.1.10"
 edition = "2021"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "GPL-3.0-only"
 description = "Яндекс Музыка RS — неофициальный клиент Яндекс Музыки на Rust"
 repository = "https://github.com/ilkruglov/yamusic-rs"
@@ -12,9 +12,10 @@ asio = ["dep:winreg", "dep:cc"]
 
 [dependencies]
 tempfile = "3"
-skia-safe = { version = "0.153.3", default-features = false }
-slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "unstable-fontique-011", "unstable-winit-030"] }
-rodio = { version = "0.20", default-features = false, features = ["symphonia-mp3", "symphonia-aac", "symphonia-isomp4"] }
+skia-safe = { version = "0.157.0", default-features = false }
+slint = { version = "1.19", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "unstable-fontique-012", "unstable-winit-030"] }
+rodio = { version = "0.20", default-features = false }
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "flac"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip", "socks"] }
 tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive"] }
@@ -51,6 +52,7 @@ features = [
   "Win32_UI_Controls_Dialogs",
   "Win32_UI_Shell_Common",
   "Win32_System_Com",
+  "Win32_Globalization",
 ]
 
 [target.'cfg(windows)'.dependencies.windows]
@@ -82,7 +84,7 @@ secret-service = { version = "5.2", default-features = false, features = ["rt-as
 
 [build-dependencies]
 cc = { version = "1", optional = true }
-slint-build = "1.18"
+slint-build = "1.19"
 
 [profile.release]
 opt-level = 3

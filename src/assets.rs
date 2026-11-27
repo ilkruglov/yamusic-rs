@@ -223,8 +223,8 @@ pub(crate) fn load_fonts(source: &mut Source) -> Vec<Vec<u8>> {
 }
 
 pub(crate) fn register_fonts(fonts: Vec<Vec<u8>>) {
-    use slint::fontique_011::fontique;
-    let mut collection = slint::fontique_011::shared_collection();
+    use slint::fontique_012::fontique;
+    let mut collection = slint::fontique_012::shared_collection();
     for sfnt in fonts {
         collection.register_fonts(fontique::Blob::new(std::sync::Arc::new(sfnt)), None);
     }

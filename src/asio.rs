@@ -116,12 +116,16 @@ impl Mixer {
 
 // Декодер может ждать сеть. Вызов драйвера берёт только готовый блок или выдаёт тишину.
 struct RenderBuffers {
+    channels: usize,
+    rate: u32,
     ready: mpsc::Receiver<Box<[f32]>>,
     free: mpsc::SyncSender<Box<[f32]>>,
 }
 
 impl RenderBuffers {
     fn new(mut mixer: Mixer, samples: usize) -> std::io::Result<Self> {
+        let channels = usize::from(mixer.channels);
+        let rate = mixer.stereo.sample_rate();
         let (free, spare) = mpsc::sync_channel(2);
         let (filled, ready) = mpsc::sync_channel(2);
         for _ in 0..2 {
@@ -133,7 +137,7 @@ impl RenderBuffers {
                 if filled.send(block).is_err() { break; }
             }
         })?;
-        Ok(Self { ready, free })
+        Ok(Self { ready, free, channels, rate })
     }
 
     fn fill(&mut self, out: &mut [f32]) {
@@ -145,6 +149,7 @@ impl RenderBuffers {
             }
             Err(_) => out.fill(0.0),
         }
+        crate::output::TAP.record_asio(out, self.channels, self.rate);
     }
 }
 
@@ -307,6 +312,7 @@ mod tests {
         }));
         let mut buffers = RenderBuffers::new(Mixer { stereo, channels: 2 }, 16).unwrap();
         worker.recv_timeout(Duration::from_secs(2)).unwrap();
+        crate::output::TAP.listen(true);
         let mut out = [1.0; 16];
         buffers.fill(&mut out);
         assert_eq!(out, [0.0; 16]);
@@ -318,6 +324,10 @@ mod tests {
             assert!(Instant::now() < deadline, "буфер не получил звук после возобновления источника");
             std::thread::yield_now();
         }
+        let (_, samples, rate) = crate::output::TAP.snapshot();
+        crate::output::TAP.listen(false);
+        assert_eq!(rate, 48000);
+        assert_eq!(&samples[samples.len() - 8..], &[0.5; 8]);
     }
 
     #[test]

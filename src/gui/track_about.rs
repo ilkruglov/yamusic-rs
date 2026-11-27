@@ -36,6 +36,7 @@ impl Ctx {
         let with_info = t.is_episode() || t.is_chapter();
         let pending = if with_info { vec![shimmer(), shimmer()] } else { vec![shimmer()] };
         app.set_track_about_lines(ModelRc::from(Rc::new(VecModel::from(pending))));
+        self.clear_track_card();
         app.set_track_about_open(true);
         let gen = TA.with(|a| {
             let mut a = a.borrow_mut();

@@ -174,7 +174,7 @@ extern "system" fn on_action(_env: JNIEnv, _class: JClass, code: jint) {
         3 => p.send(Cmd::Prev),
         4 => {
             if let Some(t) = s.track {
-                p.send(Cmd::LikeTrack(t, None));
+                p.send(Cmd::LikeTrack(Box::new(t), None));
             }
         }
         5 => p.send(Cmd::Dislike(None)),
